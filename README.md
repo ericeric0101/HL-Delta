@@ -85,6 +85,20 @@ export HYPERLIQUID_ADDRESS={SUB_ACCOUNT_TRADING_ADDRESS}
 ```bash
 python example.py
 ```
+- 系統會檢查 config.json 中的 autostart 設定，如果設為 true（預設值），機器人會自動開始交易。
+
+## 一旦啟動，系統會進入主要監控循環：
+- 定期檢查：每 60 秒（可在配置中調整）檢查一次
+- 資金費率監控：在每小時的第 50 分鐘檢查資金費率
+- 自動下單條件：當找到年化收益率 ≥ 5% 的機會時會自動創建 delta-neutral 部位
+
+## 系統會自動執行以下操作：
+- 創建部位：同時買入現貨和做空永續合約
+- 切換部位：當當前部位收益率低於 5% 且有更好機會時，會自動關閉舊部位並創建新部位
+- 訂單追蹤：自動監控訂單執行狀態
+
+**注意**：如果想要手動控制而非自動交易，可以在 `config.json` 中將 autostart 設為 false，然後通過 API 端點手動控制機器人的啟動和停止。
+
 5. Start the bot:
 ```bash
 python Delta.py

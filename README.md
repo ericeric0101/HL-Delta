@@ -97,7 +97,18 @@ python example.py
 - 切換部位：當當前部位收益率低於 5% 且有更好機會時，會自動關閉舊部位並創建新部位
 - 訂單追蹤：自動監控訂單執行狀態
 
-**注意**：如果想要手動控制而非自動交易，可以在 `config.json` 中將 autostart 設為 false，然後通過 API 端點手動控制機器人的啟動和停止。
+**注意 1**：如果想要手動控制而非自動交易，可以在 `config.json` 中將 autostart 設為 false，然後通過 API 端點手動控制機器人的啟動和停止。
+
+**注意 2**：當您設定 "autostart": false 時，後端服務會正常啟動，API伺服器也會運行，但交易機器人本身的核心邏輯會處於「待命」狀態。
+
+日誌中的 Call start() manually to begin. 這句話的意思是「請手動呼叫 start()函數來開始運作」。這裡的「呼叫」並不是指在終端機輸入一個新的指令，而是指透過 API 來向正在運行的後端程式下達「開始」的指令。
+   1. 啟動後端服務 (python entrypoint.py)。
+   2. 啟動前端服務 (cd frontend && npm start)。
+   3. 在瀏覽器中打開 http://localhost:3000。
+   4. 在儀表板右上角的「Account Overview」區塊，您會看到一個綠色的 "Start" 按鈕。
+   5. 點擊這個 "Start" 按鈕。
+
+點擊按鈕後，前端會發送一個 POST 請求到後端的 /api/bot/start 端點，後端收到請求後就會呼叫 start() 函數，您的機器人便會開始執行交易邏輯。
 
 5. Start the bot:
 ```bash
@@ -152,6 +163,11 @@ docker run -d \
   --env-file .env \
   hypervault-tradingbot:delta-1.0.0
 ```
+
+## 本專案配備前端UI讓使用者更方便地追蹤bot運作
+
+- 首先開啟新的terminal執行 `python entrypoint.py` 來啟動後端 (必須在 localhost:8080 上運行)
+- 接著再開啟另外一個terminal，導航到 frontend 目錄，然後執行 `npm start` (網址通常是 http://localhost:3000)。
 
 ## The HyperVault Trading Ecosystem (Coming Soon!)
 

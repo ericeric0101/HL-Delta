@@ -23,30 +23,34 @@ const Dashboard: React.FC = () => {
   return (
     <Box sx={{ display: 'flex' }}>
       <CssBaseline />
-      <AppBar position="fixed">
+      <AppBar position="fixed" color="default" elevation={1}>
         <Toolbar>
-          <Typography variant="h6" noWrap component="div">
+          <Typography variant="h6" noWrap component="div" sx={{ fontWeight: 600 }}>
             Delta Bot Dashboard
           </Typography>
         </Toolbar>
       </AppBar>
+
       <Box
         component="main"
         sx={{
           flexGrow: 1,
-          bgcolor: '#f3f4f6', // Light gray background
+          bgcolor: 'background.default',
           p: 3,
-          marginTop: '64px',
+          mt: '64px',
         }}
       >
-        <Container maxWidth={false}>
+        <Container maxWidth="xl">
           <Grid container spacing={3}>
-            <Grid size={{ xs: 12 }}>
+            {/* Bot Status / Controls */}
+            <Grid size={{ xs: 12, md: 4 }}>
               <StatusOverview status={status} error={error} loading={loading} refresh={refresh} />
             </Grid>
-            <Grid size={{ xs: 12, lg: 8 }}>
-              <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column' }}>
-                <Typography variant="h6" gutterBottom>
+
+            {/* Current Positions */}
+            <Grid size={{ xs: 12, md: 8 }}>
+              <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column', height: '100%' }}>
+                <Typography variant="h6" gutterBottom fontWeight={600}>
                   Current Positions
                 </Typography>
                 {loading && !status ? (
@@ -60,10 +64,14 @@ const Dashboard: React.FC = () => {
                 )}
               </Paper>
             </Grid>
-            <Grid size={{ xs: 12, lg: 4 }}>
+
+            {/* Config Manager */}
+            <Grid size={{ xs: 12, md: 4 }}>
               <ConfigManager />
             </Grid>
-            <Grid size={{ xs: 12 }}>
+
+            {/* Logs */}
+            <Grid size={{ xs: 12, md: 8 }}>
               <LogViewer />
             </Grid>
           </Grid>

@@ -28,7 +28,7 @@ const LogViewer: React.FC = () => {
 
   return (
     <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column', height: '400px' }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+      <Box sx={{ bgcolor: 'grey.900', color: '#e5e7eb', p: 2, borderRadius: 1 }}>
         <Typography variant="h6" gutterBottom>
           Live Logs
         </Typography>

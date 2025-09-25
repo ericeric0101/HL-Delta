@@ -2,12 +2,12 @@ import React from 'react';
 import {
   Paper,
   Typography,
-  Grid,
   Chip,
   CircularProgress,
   Alert,
   Button,
-  Box,
+  Stack,
+  Grid,
 } from '@mui/material';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
@@ -43,81 +43,95 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
   const handleShutdown = async () => {
     if (window.confirm('Are you sure you want to shut down the entire backend? This will stop the bot and the API server.')) {
       try {
-        // We don't need to wait for a response, as the server will be shutting down.
         apiClient.post('/bot/shutdown');
         alert('Shutdown signal sent to backend. You may need to refresh the page later.');
       } catch (err) {
-        // This part may not even be reached if the server shuts down immediately.
         console.error('Failed to send shutdown signal', err);
       }
     }
   };
 
-  if (loading && !status) {
-    return <CircularProgress />;
-  }
+  if (loading && !status) return <CircularProgress />;
+  if (error) return <Alert severity="error">{error}</Alert>;
+  if (!status) return <Typography>No status data available.</Typography>;
 
-  if (error) {
-    return <Alert severity="error">{error}</Alert>;
-  }
-
-  if (!status) {
-    return <Typography>No status data available.</Typography>;
-  }
+  const running = status.running;
 
   return (
-    <Paper sx={{ p: 2 }}>
-      <Grid container spacing={2} alignItems="center">
-        <Grid size={{ xs: 12, md: 4 }}>
-          <Typography variant="subtitle2" color="text.secondary">
+    <Grid container spacing={3}>
+      {/* 上排：兩張小卡並排（md 以上各佔 6），和你提供的白底布局一致 */}
+      <Grid size={{ xs: 12, md: 6 }}>
+        <Paper sx={{ p: 2, height: '100%', borderRadius: 1 }}>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
             Account Value
           </Typography>
-          <Typography variant="h5" component="div" fontWeight="bold">
+          <Typography variant="h4" fontWeight={700}>
             ${status.account.total_value.toFixed(2)}
           </Typography>
-        </Grid>
-        <Grid size={{ xs: 12, md: 4 }}>
-          <Typography variant="subtitle2" color="text.secondary">
+        </Paper>
+      </Grid>
+
+      <Grid size={{ xs: 12, md: 6 }}>
+        <Paper sx={{ p: 2, height: '100%', borderRadius: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
             Bot Status
           </Typography>
           <Chip
-            icon={status.running ? <PlayCircleOutlineIcon /> : <PowerSettingsNewIcon />}
-            label={status.running ? 'Running' : 'Stopped'}
-            color={status.running ? 'success' : 'error'}
-            sx={{ mt: 1, fontWeight: 'bold' }}
+            icon={running ? <PlayCircleOutlineIcon /> : <PowerSettingsNewIcon />}
+            label={running ? 'Running' : 'Stopped'}
+            color={running ? 'success' : 'error'}
+            size="medium"
+            sx={{ alignSelf: 'flex-start', fontWeight: 700, px: 1.25 }}
           />
-        </Grid>
-        <Grid size={{ xs: 12, md: 4 }} sx={{ textAlign: { xs: 'left', md: 'right' }, mt: { xs: 2, md: 0 } }}>
-          <Box>
+        </Paper>
+      </Grid>
+
+      {/* 下排：Bot Controls 獨占一整行（xs/md 12） */}
+      <Grid size={{ xs: 12 }}>
+        <Paper sx={{ p: 2.5, borderRadius: 1 }}>
+          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+            Bot Controls
+          </Typography>
+
+          {/* 水平排列；空間不夠自動換行，不會擠在一起 */}
+          <Stack
+            direction="row"
+            spacing={1.5}
+            useFlexGap
+            flexWrap="wrap"
+          >
             <Button
               variant="contained"
               color="success"
               onClick={handleStart}
-              disabled={status.running}
-              sx={{ mr: 1 }}
+              disabled={running}
+              sx={{ minWidth: 136 }}
             >
               Start
             </Button>
+
             <Button
               variant="contained"
-              color="error"
+              color="warning"
               onClick={handleStop}
-              disabled={!status.running}
-              sx={{ mr: 1 }}
+              disabled={!running}
+              sx={{ minWidth: 136 }}
             >
               Stop
             </Button>
+
             <Button
-              variant="outlined"
+              variant="contained"
               color="error"
               onClick={handleShutdown}
+              sx={{ minWidth: 200 }}
             >
               Shutdown Backend
             </Button>
-          </Box>
-        </Grid>
+          </Stack>
+        </Paper>
       </Grid>
-    </Paper>
+    </Grid>
   );
 };
 

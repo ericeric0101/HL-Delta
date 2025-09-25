@@ -34,12 +34,12 @@ const Dashboard: React.FC = () => {
         component="main"
         sx={{
           flexGrow: 1,
-          bgcolor: 'background.default',
+          bgcolor: '#f3f4f6', // Light gray background
           p: 3,
           marginTop: '64px',
         }}
       >
-        <Container maxWidth="xl">
+        <Container maxWidth={false}>
           <Grid container spacing={3}>
             <Grid size={{ xs: 12 }}>
               <StatusOverview status={status} error={error} loading={loading} refresh={refresh} />
@@ -63,7 +63,7 @@ const Dashboard: React.FC = () => {
             <Grid size={{ xs: 12, lg: 4 }}>
               <ConfigManager />
             </Grid>
-            <Grid size={{ xs: 12}}>
+            <Grid size={{ xs: 12 }}>
               <LogViewer />
             </Grid>
           </Grid>

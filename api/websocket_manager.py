@@ -43,9 +43,7 @@ class WebSocketLogHandler(logging.Handler):
         """Emit a log record."""
         try:
             msg = self.format(record)
-            # Strip ANSI codes before broadcasting
-            clean_msg = self.ansi_escape.sub('', msg)
             # Use asyncio.create_task to send the message without blocking the logger
-            asyncio.create_task(self.manager.broadcast(clean_msg))
+            asyncio.create_task(self.manager.broadcast(msg))
         except Exception:
             self.handleError(record)

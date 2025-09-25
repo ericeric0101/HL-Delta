@@ -18,34 +18,34 @@ interface PositionsTableProps {
 
 const PositionsTable: React.FC<PositionsTableProps> = ({ positions }) => {
   if (positions.length === 0) {
-    return <Typography>No open positions.</Typography>;
+    return <Typography sx={{ p: 2 }}>No active positions.</Typography>;
   }
 
   const formatPnl = (pnl: number) => (
-    <Typography color={pnl >= 0 ? 'success.main' : 'error.main'}>
-      {pnl.toFixed(4)}
+    <Typography variant="body2" color={pnl >= 0 ? 'success.main' : 'error.main'} sx={{ fontWeight: '500' }}>
+      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
     </Typography>
   );
 
   return (
-    <TableContainer component={Paper}>
+    <TableContainer component={Paper} sx={{ boxShadow: 'none' }}>
       <Table sx={{ minWidth: 650 }} aria-label="positions table">
-        <TableHead>
+        <TableHead sx={{ bgcolor: 'grey.50' }}>
           <TableRow>
-            <TableCell>Coin</TableCell>
-            <TableCell>Type</TableCell>
-            <TableCell align="right">Size</TableCell>
-            <TableCell align="right">Entry Price</TableCell>
-            <TableCell align="right">Position Value</TableCell>
-            <TableCell align="right">Unrealized PNL</TableCell>
-            <TableCell align="right">Leverage</TableCell>
-            <TableCell align="right">Liq. Price</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>Coin</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>Type</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Size</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Entry Price</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Position Value</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Unrealized PNL</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Leverage</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Liq. Price</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
           {positions.map((pos) => (
-            <TableRow key={`${pos.coin}-${pos.type}`}>
-              <TableCell component="th" scope="row">
+            <TableRow key={`${pos.coin}-${pos.type}`} sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
+              <TableCell component="th" scope="row" sx={{ fontWeight: '500' }}>
                 {pos.coin}
               </TableCell>
               <TableCell>
@@ -53,6 +53,7 @@ const PositionsTable: React.FC<PositionsTableProps> = ({ positions }) => {
                   label={pos.type}
                   size="small"
                   color={pos.type === 'perp' ? 'primary' : 'secondary'}
+                  sx={{ fontWeight: '500' }}
                 />
               </TableCell>
               <TableCell align="right">{pos.size.toFixed(4)}</TableCell>

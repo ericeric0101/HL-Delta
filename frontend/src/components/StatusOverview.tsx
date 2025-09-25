@@ -1,7 +1,6 @@
 import React from 'react';
 import {
-  Card,
-  CardContent,
+  Paper,
   Typography,
   Grid,
   Chip,
@@ -67,58 +66,58 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
   }
 
   return (
-    <Card sx={{ mb: 3 }}>
-      <CardContent>
-        <Grid container spacing={2} alignItems="center">
-          <Grid size={{ xs: 12, lg: 4 }}>
-            <Typography variant="h5" component="div">
-              Account Value
-            </Typography>
-            <Typography variant="h4">
-              ${status.account.total_value.toFixed(2)}
-            </Typography>
-          </Grid>
-          <Grid size={{ xs: 12, md: 4 }}>
-            <Typography color="text.secondary">Bot Status</Typography>
-            <Chip
-              icon={status.running ? <PlayCircleOutlineIcon /> : <PowerSettingsNewIcon />}
-              label={status.running ? 'Running' : 'Stopped'}
-              color={status.running ? 'success' : 'error'}
-              sx={{ mt: 1 }}
-            />
-          </Grid>
-          <Grid size={{ xs: 12, md: 4 }} sx={{ textAlign: 'right' }}>
-            <Box>
-              <Button
-                variant="contained"
-                color="success"
-                onClick={handleStart}
-                disabled={status.running}
-                sx={{ mr: 1 }}
-              >
-                Start
-              </Button>
-              <Button
-                variant="contained"
-                color="error"
-                onClick={handleStop}
-                disabled={!status.running}
-                sx={{ mr: 1 }}
-              >
-                Stop
-              </Button>
-              <Button
-                variant="outlined"
-                color="error"
-                onClick={handleShutdown}
-              >
-                Shutdown Backend
-              </Button>
-            </Box>
-          </Grid>
+    <Paper sx={{ p: 2 }}>
+      <Grid container spacing={2} alignItems="center">
+        <Grid size={{ xs: 12, md: 4 }}>
+          <Typography variant="subtitle2" color="text.secondary">
+            Account Value
+          </Typography>
+          <Typography variant="h5" component="div" fontWeight="bold">
+            ${status.account.total_value.toFixed(2)}
+          </Typography>
         </Grid>
-      </CardContent>
-    </Card>
+        <Grid size={{ xs: 12, md: 4 }}>
+          <Typography variant="subtitle2" color="text.secondary">
+            Bot Status
+          </Typography>
+          <Chip
+            icon={status.running ? <PlayCircleOutlineIcon /> : <PowerSettingsNewIcon />}
+            label={status.running ? 'Running' : 'Stopped'}
+            color={status.running ? 'success' : 'error'}
+            sx={{ mt: 1, fontWeight: 'bold' }}
+          />
+        </Grid>
+        <Grid size={{ xs: 12, md: 4 }} sx={{ textAlign: { xs: 'left', md: 'right' }, mt: { xs: 2, md: 0 } }}>
+          <Box>
+            <Button
+              variant="contained"
+              color="success"
+              onClick={handleStart}
+              disabled={status.running}
+              sx={{ mr: 1 }}
+            >
+              Start
+            </Button>
+            <Button
+              variant="contained"
+              color="error"
+              onClick={handleStop}
+              disabled={!status.running}
+              sx={{ mr: 1 }}
+            >
+              Stop
+            </Button>
+            <Button
+              variant="outlined"
+              color="error"
+              onClick={handleShutdown}
+            >
+              Shutdown Backend
+            </Button>
+          </Box>
+        </Grid>
+      </Grid>
+    </Paper>
   );
 };
 

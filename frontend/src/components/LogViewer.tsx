@@ -1,10 +1,23 @@
 import React, { useEffect, useRef } from 'react';
 import { Paper, Typography, Box, Chip } from '@mui/material';
 import { useLogStream } from '../hooks/useLogStream';
+import AnsiToHtml from 'ansi-to-html';
 
 const LogViewer: React.FC = () => {
   const { logs, isConnected } = useLogStream();
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Initialize the converter
+  const convert = React.useMemo(
+    () =>
+      new AnsiToHtml({
+        fg: '#FFF',
+        bg: '#000',
+        newline: true,
+        escapeXML: true, // 建議加這個，避免 XSS
+      }),
+    []
+  );
 
   useEffect(() => {
     // Auto-scroll to the bottom
@@ -14,35 +27,35 @@ const LogViewer: React.FC = () => {
   }, [logs]);
 
   return (
-    <Paper sx={{ p: 2, mt: 3, display: 'flex', flexDirection: 'column' }}>
+    <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column', height: '400px' }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-        <Typography variant="h6" gutterBottom component="div">
+        <Typography variant="h6" gutterBottom>
           Live Logs
         </Typography>
-        <Chip 
-          label={isConnected ? 'Connected' : 'Disconnected'} 
-          color={isConnected ? 'success' : 'error'} 
+        <Chip
+          label={isConnected ? 'Connected' : 'Disconnected'}
+          color={isConnected ? 'success' : 'error'}
           size="small"
         />
       </Box>
-      <Paper 
-        ref={scrollRef} 
+      <Box
+        ref={scrollRef}
+        className="log-container"
         sx={{
-          bgcolor: 'black',
-          color: 'white',
-          fontFamily: 'monospace',
-          fontSize: '0.8rem',
+          flexGrow: 1,
+          overflowY: 'auto',
+          bgcolor: 'grey.900',
           p: 2,
-          height: '400px',
-          overflowY: 'scroll',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-all',
+          borderRadius: 1,
+          fontFamily: 'monospace',
+          fontSize: '0.875rem',
+          color: 'white',
         }}
       >
         {logs.map((log, index) => (
-          <div key={index}>{log}</div>
+          <div key={index} dangerouslySetInnerHTML={{ __html: convert.toHtml(log) }} />
         ))}
-      </Paper>
+      </Box>
     </Paper>
   );
 };

@@ -53,12 +53,15 @@ async def stop_bot():
         raise HTTPException(status_code=500, detail="Bot instance not initialized")
     
     try:
-        # Stop the bot but keep the API running
+        # Stop the bot's main loop first
+        await bot.stop()
+        
+        # Then, close all positions
         await bot.close_all_delta_positions()
         
         return BotResponse(
             success=True,
-            message="Bot stopped successfully"
+            message="Bot stopped successfully and positions are being closed."
         )
     except Exception as e:
         logger.error(f"Error stopping bot: {e}")

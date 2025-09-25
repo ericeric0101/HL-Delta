@@ -1091,13 +1091,17 @@ class Delta:
         except Exception as e:
             logger.error(f"{Colors.RED}Error checking hourly funding rates: {e}{Colors.RESET}", exc_info=True)
     
+    async def stop(self):
+        """Stop the bot's execution loop."""
+        if not self._is_running:
+            logger.info("Bot is not running")
+            return
+            
+        logger.info("Stopping Delta bot...")
+        self._is_running = False
+
     async def start(self):
         """Start the bot's execution loop."""
-        # Check if bot should autostart
-        if not self.config["general"].get("autostart", True):
-            logger.info("Autostart disabled in config. Call start() manually to begin.")
-            return
-        
         if self._is_running:
             logger.info("Bot is already running")
             return
@@ -1184,7 +1188,7 @@ class Delta:
                 logger.info(f"{Colors.YELLOW}Best funding rate ({rate:.4f}%) is below 5% threshold, not creating position{Colors.RESET}")
 
         # Main loop
-        while True:
+        while self._is_running:
             try:
                 # Check pending orders
                 await self.check_pending_orders()

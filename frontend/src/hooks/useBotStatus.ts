@@ -26,7 +26,7 @@ export const useBotStatus = () => {
 
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 15000); // Refresh every 15 seconds
+    const interval = setInterval(fetchStatus, 3000); // Refresh every 3 seconds
 
     return () => clearInterval(interval);
   }, [fetchStatus]);

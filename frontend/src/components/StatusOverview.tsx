@@ -12,12 +12,17 @@ import {
 } from '@mui/material';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import { useBotStatus } from '../hooks/useBotStatus';
+import { BotStatus } from '../types';
 import apiClient from '../api/client';
 
-const StatusOverview: React.FC = () => {
-  const { status, error, loading, refresh } = useBotStatus();
+interface Props {
+  status: BotStatus | null;
+  error: string | null;
+  loading: boolean;
+  refresh: () => void;
+}
 
+const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) => {
   const handleStart = async () => {
     try {
       await apiClient.post('/bot/start');

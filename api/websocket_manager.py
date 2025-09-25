@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import List
 from fastapi import WebSocket
 
@@ -34,12 +35,16 @@ class WebSocketLogHandler(logging.Handler):
     def __init__(self, manager_instance: ConnectionManager):
         super().__init__()
         self.manager = manager_instance
+        # Regex to strip ANSI escape codes
+        self.ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
     def emit(self, record):
         """Emit a log record."""
         try:
             msg = self.format(record)
+            # Strip ANSI codes before broadcasting
+            clean_msg = self.ansi_escape.sub('', msg)
             # Use asyncio.create_task to send the message without blocking the logger
-            asyncio.create_task(self.manager.broadcast(msg))
+            asyncio.create_task(self.manager.broadcast(clean_msg))
         except Exception:
             self.handleError(record)

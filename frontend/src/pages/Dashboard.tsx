@@ -18,7 +18,7 @@ import LogViewer from '../components/LogViewer';
 import { useBotStatus } from '../hooks/useBotStatus';
 
 const Dashboard: React.FC = () => {
-  const { status, error, loading } = useBotStatus();
+  const { status, error, loading, refresh } = useBotStatus();
 
   return (
     <Box sx={{ display: 'flex' }}>
@@ -42,7 +42,7 @@ const Dashboard: React.FC = () => {
         <Container maxWidth="xl">
           <Grid container spacing={3}>
             <Grid size={{ xs: 12 }}>
-              <StatusOverview />
+              <StatusOverview status={status} error={error} loading={loading} refresh={refresh} />
             </Grid>
             <Grid size={{ xs: 12, lg: 8 }}>
               <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column' }}>

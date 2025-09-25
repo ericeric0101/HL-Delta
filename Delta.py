@@ -76,7 +76,8 @@ class PendingDeltaOrder:
     last_check_time: float = field(default_factory=time.time)
     spot_filled: bool = False
     perp_filled: bool = False
-    max_wait_time: int = 300  # 5 minutes in seconds
+    max_wait_time: int = 60  # 1 minute in seconds
+    relist_count: int = 0
     is_closing_position: bool = False  # Flag to indicate if this is for closing a position
 
 
@@ -94,7 +95,7 @@ class Delta:
             # Set debug mode from config
             if self.config["general"].get("debug", False):
                 logger.setLevel(logging.DEBUG)
-                logger.debug("Debug mode enabled")
+                logger.debug("偵錯模式已啟用")
             
             # Load credentials from environment variables
             private_key = self._get_required_env("HYPERLIQUID_PRIVATE_KEY")
@@ -215,17 +216,17 @@ class Delta:
                             "entry_ntl": float(balance["entryNtl"])
                         }
             
-            logger.info(f"Initialized with account: {self.address[:8]}...")
-            logger.info(f"Total account value: ${self.account_value}")
+            logger.info(f"已使用帳戶初始化: {self.address[:8]}...")
+            logger.info(f"總帳戶價值: ${self.account_value}")
         except Exception as e:
-            logger.error(f"Failed to initialize clients: {e}")
-            raise RuntimeError("Client initialization failed") from e
+            logger.error(f"初始化客戶端失敗: {e}")
+            raise RuntimeError("客戶端初始化失敗") from e
 
     def _get_required_env(self, env_name):
         """Get a required environment variable or raise an informative error."""
         value = os.getenv(env_name)
         if not value or value == "your_private_key_here" or value == "your_eth_address_here":
-            raise ValueError(f"{env_name} environment variable not set or has default placeholder value")
+            raise ValueError(f"{env_name} 環境變數未設定或仍為預設值")
         return value
 
     def _load_config(self):
@@ -233,16 +234,16 @@ class Delta:
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-                logger.info(f"Loaded configuration from {self.config_path}")
+                logger.info(f"已從 {self.config_path} 載入設定")
                 return config
         except FileNotFoundError:
-            logger.error(f"Configuration file {self.config_path} not found")
+            logger.error(f"找不到設定檔 {self.config_path}")
             raise
         except json.JSONDecodeError:
-            logger.error(f"Error parsing JSON in {self.config_path}")
+            logger.error(f"解析 {self.config_path} 的 JSON 時發生錯誤")
             raise
         except Exception as e:
-            logger.error(f"Unexpected error loading config: {e}")
+            logger.error(f"載入設定時發生未預期的錯誤: {e}")
             raise
         
     def _get_spot_account_USDC(self):
@@ -293,7 +294,7 @@ class Delta:
         
         # Ensure we have sufficient USDC (at least $10 worth)
         if available_usdc < 10:
-            logger.warning(f"Insufficient USDC balance for spot purchase: ${available_usdc:.2f}")
+            logger.warning(f"USDC 餘額不足，無法購買現貨: ${available_usdc:.2f}")
             return 0
         
         # Calculate size based on available USDC and current price
@@ -303,13 +304,13 @@ class Delta:
         min_size_value = 10 / spot_price
         
         if size < min_size_value:
-            logger.warning(f"Calculated spot size too small: {size} (min: {min_size_value})")
+            logger.warning(f"計算出的現貨規模太小: {size} (最小: {min_size_value})")
             return 0
             
         rounded_size = self.round_size(coin_name, True, size)
         
         # Log the calculation for debugging
-        logger.info(f"Calculated optimal spot size for {coin_name}: {size} -> rounded to {rounded_size} (USDC: ${available_usdc:.2f}, price: ${spot_price:.2f})")
+        logger.info(f"計算 {coin_name} 的最佳現貨規模: {size} -> 四捨五入至 {rounded_size} (USDC: ${available_usdc:.2f}, 價格: ${spot_price:.2f})")
         
         return rounded_size
     
@@ -325,7 +326,7 @@ class Delta:
         rounded_size = self.round_size(coin_name, False, spot_size)
         
         # Log the calculation for debugging
-        logger.info(f"Calculated optimal perp size for {coin_name}: {spot_size} -> rounded to {rounded_size}")
+        logger.info(f"計算 {coin_name} 的最佳永續合約規模: {spot_size} -> 四捨五入至 {rounded_size}")
         
         return rounded_size
     
@@ -348,13 +349,13 @@ class Delta:
     
     def has_delta_neutral_position(self, coin_name, error_margin=0.05):
         if coin_name not in self.coins:
-            logger.warning(f"Coin {coin_name} not found in tracked coins")
+            logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
             return False, 0, 0, 0
         
         coin_info = self.coins[coin_name]
         
         if not (coin_info.perp and coin_info.spot):
-            logger.debug(f"{coin_name} doesn't have both perp and spot markets")
+            logger.debug(f"{coin_name} 沒有同時擁有永續合約和現貨市場")
             return False, 0, 0, 0
             
         perp_size = 0
@@ -411,10 +412,10 @@ class Delta:
             if 'filled' in spot_response:
                 pending_order.spot_filled = True
                 pending_order.spot_oid = int(spot_response['filled']['oid'])
-                logger.info(f"Spot {operation_type} order for {coin_name} filled immediately with oid: {pending_order.spot_oid}")
+                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單立即成交，訂單 ID: {pending_order.spot_oid}")
             elif 'resting' in spot_response:
                 pending_order.spot_oid = int(spot_response['resting']['oid'])
-                logger.info(f"Spot {operation_type} order for {coin_name} resting with oid: {pending_order.spot_oid}")
+                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單已掛單，訂單 ID: {pending_order.spot_oid}")
         
         # Extract order IDs from perp order response
         if perp_order_result and perp_order_result.get('status') == 'ok':
@@ -422,84 +423,99 @@ class Delta:
             if 'filled' in perp_response:
                 pending_order.perp_filled = True
                 pending_order.perp_oid = int(perp_response['filled']['oid'])
-                logger.info(f"Perp {operation_type} order for {coin_name} filled immediately with oid: {pending_order.perp_oid}")
+                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單立即成交，訂單 ID: {pending_order.perp_oid}")
             elif 'resting' in perp_response:
                 pending_order.perp_oid = int(perp_response['resting']['oid'])
-                logger.info(f"Perp {operation_type} order for {coin_name} resting with oid: {pending_order.perp_oid}")
+                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單已掛單，訂單 ID: {pending_order.perp_oid}")
         
         # Determine if we need to track these orders or if they're already complete
         if (pending_order.spot_oid or pending_order.perp_oid) and (not pending_order.spot_filled or not pending_order.perp_filled):
             self.pending_orders.append(pending_order)
-            logger.info(f"Added pending {operation_type} position for {coin_name} to tracking")
+            logger.info(f"已將 {coin_name} 的待處理 {operation_type} 部位加入追蹤")
             return True
         elif pending_order.spot_filled and pending_order.perp_filled:
             # If both orders filled immediately, we don't need to track
-            logger.info(f"Both {operation_type} orders for {coin_name} filled immediately")
+            logger.info(f"{coin_name} 的兩筆 {operation_type} 訂單皆立即成交")
             return True
         else:
-            logger.warning(f"Failed to create or track {operation_type} orders for {coin_name}")
+            logger.warning(f"無法建立或追蹤 {coin_name} 的 {operation_type} 訂單")
             return False
     
     async def create_delta_position(self, coin_name):
         if coin_name not in self.coins:
-            logger.warning(f"Coin {coin_name} not found in tracked coins")
+            logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
             return False
         
         coin_info = self.coins[coin_name]
         
         if not (coin_info.perp and coin_info.spot):
-            logger.warning(f"{coin_name} doesn't have both perp and spot markets")
+            logger.warning(f"{coin_name} 沒有同時擁有永續合約和現貨市場")
             return False
         
         # Check if we already have a delta-neutral position for this coin
         is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
         if is_delta_neutral:
-            logger.info(f"Already have a delta-neutral position for {coin_name} - perp: {perp_size}, spot: {spot_size}")
+            logger.info(f"已持有 {coin_name} 的 Delta 中性部位 - 永續合約: {perp_size}, 現貨: {spot_size}")
             return True
         
         try:
-            price = self._get_spot_price(coin_name)
+            # Get L2 book data to find best bid and ask
+            l2_book = self.info.l2_snapshot(coin_name)
+            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
+                logger.error(f"無法取得 {coin_name} 的 L2 訂單簿")
+                return False
+            
+            best_bid = float(l2_book["levels"][0][0]['px'])
+            best_ask = float(l2_book["levels"][1][0]['px'])
+
+            # Check for a reasonable spread to avoid placing bad orders
+            spread = (best_ask - best_bid) / best_ask
+            if spread > 0.01: # If spread is > 1%, it might be too risky
+                 logger.warning(f"{coin_name} 的價差過大 ({spread:.2%})，跳過下單。")
+                 return False
+
+            price = (best_bid + best_ask) / 2
             if price <= 0:
-                logger.error(f"Invalid price for {coin_name}: {price}")
+                logger.error(f"{coin_name} 的價格無效: {price}")
                 return False
             
             # Get optimal sizes for spot and perp
             spot_size = self._calculate_optimal_spot_size(coin_name)
             if spot_size <= 0:
-                logger.error(f"Calculated spot size for {coin_name} is not positive: {spot_size}")
+                logger.error(f"計算出的 {coin_name} 現貨規模非正數: {spot_size}")
                 return False
                 
             perp_size = spot_size  # For delta-neutral, perp size equals spot size
             
             # Validate the sizes after rounding
             if spot_size <= 0 or perp_size <= 0:
-                logger.error(f"Invalid position size after rounding for {coin_name}: spot={spot_size}, perp={perp_size}")
+                logger.error(f"四捨五入後 {coin_name} 的部位規模無效: 現貨={spot_size}, 永續合約={perp_size}")
                 return False
             
             # Calculate minimum size based on $10 value
             min_size_value = 10 / price
             if spot_size < min_size_value:
-                logger.warning(f"Calculated position size for {coin_name} is too small: {spot_size} < {min_size_value}")
-                logger.warning(f"Current price: ${price}, minimum position value: $10")
+                logger.warning(f"計算出的 {coin_name} 部位規模太小: {spot_size} < {min_size_value}")
+                logger.warning(f"當前價格: ${price}, 最小部位價值: $10")
                 return False
                 
             # Ensure we have enough USDC for this purchase
             required_usdc = spot_size * price
             available_usdc = self._get_spot_account_USDC()
             if required_usdc > available_usdc * 0.95:  # Leave 5% buffer
-                logger.warning(f"Insufficient USDC for {coin_name} position: need ${required_usdc:.2f}, have ${available_usdc:.2f}")
+                logger.warning(f"建立 {coin_name} 部位所需 USDC 不足: 需要 ${required_usdc:.2f}, 現有 ${available_usdc:.2f}")
                 return False
                 
-            tick_size = coin_info.spot.tick_size
-            spot_limit_price = self.round_price(coin_name, price + tick_size)
-            perp_limit_price = self.round_price(coin_name, price - tick_size)
+            # Set limit prices to be a maker
+            spot_limit_price = self.round_price(coin_name, best_bid)
+            perp_limit_price = self.round_price(coin_name, best_ask)
                 
             # Create a new pending order to track
             pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=False)
             spot_order_result = None
             perp_order_result = None
                 
-            logger.info(f"Creating spot buy limit order for {coin_name}: {spot_size} @ {spot_limit_price}")
+            logger.info(f"正在建立 {coin_name} 的現貨限價買單: {spot_size} @ {spot_limit_price} (僅掛單)")
             if coin_name == "BTC":
                 spot_name = "UBTC"
             elif coin_name == "ETH":
@@ -509,12 +525,12 @@ class Delta:
                 
             spot_pair = f"{spot_name}/USDC"
             
-            spot_order_result = self.exchange.order(spot_pair, True, spot_size, spot_limit_price, {"limit": {"tif": "Gtc"}})
-            logger.info(f"Spot order result: {spot_order_result}")
+            spot_order_result = self.exchange.order(spot_pair, True, spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
+            logger.info(f"現貨訂單結果: {spot_order_result}")
             
-            logger.info(f"Creating perp short limit order for {coin_name}: {-perp_size} @ {perp_limit_price}")
-            perp_order_result = self.exchange.order(coin_name, False, perp_size, perp_limit_price, {"limit": {"tif": "Gtc"}})
-            logger.info(f"Perp order result: {perp_order_result}")
+            logger.info(f"正在建立 {coin_name} 的永續合約限價空單: {perp_size} @ {perp_limit_price} (僅掛單)")
+            perp_order_result = self.exchange.order(coin_name, False, perp_size, perp_limit_price, {"limit": {"tif": "Alo"}})
+            logger.info(f"永續合約訂單結果: {perp_order_result}")
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -526,7 +542,7 @@ class Delta:
             )
             
         except Exception as e:
-            logger.error(f"Error creating delta-neutral position for {coin_name}: {e}")
+            logger.error(f"建立 {coin_name} 的 Delta 中性部位時發生錯誤: {e}")
             return False
     
     async def check_pending_orders(self):
@@ -536,125 +552,162 @@ class Delta:
         
         current_time = time.time()
         orders_to_remove = []
-        
+        relist_threshold = 15  # 15 seconds
+        max_relists = 5
+
         for pending_order in self.pending_orders:
-            # Skip if checked recently (less than 30 seconds ago)
-            if current_time - pending_order.last_check_time < 30:
+            # Skip if checked recently
+            if current_time - pending_order.last_check_time < 10: # Check every 10s
                 continue
-                
+            
             pending_order.last_check_time = current_time
-            
-            operation_type = "closing" if pending_order.is_closing_position else "opening"
-            logger.info(f"Checking pending {operation_type} delta position for {pending_order.coin_name}")
-            
-            # Check if both orders are already filled
+            operation_type = "關閉" if pending_order.is_closing_position else "開啟"
+            logger.info(f"正在檢查 {pending_order.coin_name} 的待處理 {operation_type} Delta 部位")
+
+            # 1. Check if orders are filled
+            await self._update_order_fill_status(pending_order)
             if pending_order.spot_filled and pending_order.perp_filled:
-                logger.info(f"Both {operation_type} orders for {pending_order.coin_name} are filled, removing from pending")
+                logger.info(f"{pending_order.coin_name} 的兩筆 {operation_type} 訂單皆已成交。部位建立完成。")
                 orders_to_remove.append(pending_order)
                 continue
-            
-            # Check if we've waited too long
+
+            # 2. Handle orders that have been pending for too long (abandon)
             if current_time - pending_order.creation_time > pending_order.max_wait_time:
-                logger.warning(f"{operation_type.capitalize()} orders for {pending_order.coin_name} have been pending for too long, cancelling")
-                
-                if not pending_order.spot_filled and pending_order.spot_oid:
-                    try:
-                        if pending_order.coin_name == "BTC":
-                            spot_name = "UBTC"
-                        elif pending_order.coin_name == "ETH":
-                            spot_name = "UETH"
-                        else:
-                            spot_name = pending_order.coin_name
-                            
-                        spot_pair = f"{spot_name}/USDC"
-                        cancel_result = self.exchange.cancel(spot_pair, pending_order.spot_oid)
-                        logger.info(f"Cancelled spot {operation_type} order for {pending_order.coin_name}: {cancel_result}")
-                    except Exception as e:
-                        logger.error(f"Error cancelling spot {operation_type} order for {pending_order.coin_name}: {e}")
-                
-                if not pending_order.perp_filled and pending_order.perp_oid:
-                    try:
-                        cancel_result = self.exchange.cancel(pending_order.coin_name, pending_order.perp_oid)
-                        logger.info(f"Cancelled perp {operation_type} order for {pending_order.coin_name}: {cancel_result}")
-                    except Exception as e:
-                        logger.error(f"Error cancelling perp {operation_type} order for {pending_order.coin_name}: {e}")
-                
+                logger.warning(f"{pending_order.coin_name} 的 {operation_type} 訂單已超過最大等待時間。正在取消。")
+                await self._cancel_unfilled_orders(pending_order, operation_type)
                 orders_to_remove.append(pending_order)
-                
-                # Only try to recreate a delta position if we were opening, not closing
-                if not pending_order.is_closing_position:
-                    logger.info(f"Recreating delta position for {pending_order.coin_name}")
-                    await self.create_delta_position(pending_order.coin_name)
-                else:
-                    logger.info(f"Not attempting to recreate closing position for {pending_order.coin_name}")
                 continue
-            
-            # Check current order status from exchange
-            try:
-                # Check spot order status if not already filled
-                if not pending_order.spot_filled and pending_order.spot_oid:
-                    if pending_order.coin_name == "BTC":
-                        spot_name = "UBTC"
-                    elif pending_order.coin_name == "ETH":
-                        spot_name = "UETH"
-                    else:
-                        spot_name = pending_order.coin_name
-                        
-                    # Check if spot order is filled by checking order status
-                    spot_order_response = self.exchange.info.query_order_by_oid(self.address, pending_order.spot_oid)
-                    logger.debug(f"Spot order status response: {spot_order_response}")
-                    
-                    # Check if the order is still open based on the status field
-                    if spot_order_response.get('status') == 'order':
-                        order_data = spot_order_response.get('order', {})
-                        if order_data.get('status') != 'open':
-                            # Order is not open anymore, assume filled
-                            logger.info(f"Spot {operation_type} order for {pending_order.coin_name} is no longer open, marking as filled")
-                            pending_order.spot_filled = True
-                    else:
-                        # If the response doesn't contain the order, it might have been filled
-                        logger.info(f"Spot {operation_type} order for {pending_order.coin_name} not found, marking as filled")
-                        pending_order.spot_filled = True
-                
-                # Check perp order status if not already filled
-                if not pending_order.perp_filled and pending_order.perp_oid:
-                    # Check if perp order is filled by checking order status
-                    perp_order_response = self.exchange.info.query_order_by_oid(self.address, pending_order.perp_oid)
-                    logger.debug(f"Perp order status response: {perp_order_response}")
-                    
-                    # Check if the order is still open based on the status field
-                    if perp_order_response.get('status') == 'order':
-                        order_data = perp_order_response.get('order', {})
-                        if order_data.get('status') != 'open':
-                            # Order is not open anymore, assume filled
-                            logger.info(f"Perp {operation_type} order for {pending_order.coin_name} is no longer open, marking as filled")
-                            pending_order.perp_filled = True
-                    else:
-                        # If the response doesn't contain the order, it might have been filled
-                        logger.info(f"Perp {operation_type} order for {pending_order.coin_name} not found, marking as filled")
-                        pending_order.perp_filled = True
-                
-                # If both are now filled, remove from pending
-                if pending_order.spot_filled and pending_order.perp_filled:
-                    logger.info(f"Both {operation_type} orders for {pending_order.coin_name} are now filled, removing from pending")
+
+            # 3. Handle re-listing for partially filled or unfilled orders
+            if not (pending_order.spot_filled and pending_order.perp_filled) and (current_time - pending_order.last_check_time > relist_threshold):
+                if pending_order.relist_count >= max_relists:
+                    logger.error(f"{pending_order.coin_name} 的訂單已達最大重新掛單次數 ({max_relists})。放棄處理。")
+                    await self._cancel_unfilled_orders(pending_order, operation_type)
                     orders_to_remove.append(pending_order)
+                    continue
                 
-            except Exception as e:
-                logger.error(f"Error checking {operation_type} order status for {pending_order.coin_name}: {e}")
-        
+                logger.info(f"{pending_order.coin_name} 的訂單待處理中。嘗試重新掛單 (第 {pending_order.relist_count + 1}/{max_relists} 次)。")
+                
+                # Cancel existing unfilled orders before creating new ones
+                await self._cancel_unfilled_orders(pending_order, operation_type)
+                
+                pending_order.relist_count += 1
+                pending_order.last_check_time = current_time # Reset timer after relist
+
+                # Re-create the logic for the unfilled part
+                await self._relist_unfilled_orders(pending_order)
+
         # Remove processed orders
         for order in orders_to_remove:
-            self.pending_orders.remove(order)
+            if order in self.pending_orders:
+                self.pending_orders.remove(order)
+
+    async def _update_order_fill_status(self, pending_order: PendingDeltaOrder):
+        """Helper to check and update the fill status of an order from the exchange."""
+        try:
+            if not pending_order.spot_filled and pending_order.spot_oid:
+                spot_order_status = self.info.query_order_by_oid(self.address, pending_order.spot_oid)
+                if spot_order_status.get('order', {}).get('status') != 'open':
+                    logger.info(f"{pending_order.coin_name} 的現貨訂單 {pending_order.spot_oid} 不再是開啟狀態。標記為已成交。")
+                    pending_order.spot_filled = True
+
+            if not pending_order.perp_filled and pending_order.perp_oid:
+                perp_order_status = self.info.query_order_by_oid(self.address, pending_order.perp_oid)
+                if perp_order_status.get('order', {}).get('status') != 'open':
+                    logger.info(f"{pending_order.coin_name} 的永續合約訂單 {pending_order.perp_oid} 不再是開啟狀態。標記為已成交。")
+                    pending_order.perp_filled = True
+        except Exception as e:
+            logger.error(f"更新 {pending_order.coin_name} 的訂單狀態時發生錯誤: {e}")
+
+    async def _cancel_unfilled_orders(self, pending_order: PendingDeltaOrder, operation_type: str):
+        """Helper to cancel any unfilled orders associated with a pending order."""
+        coin_name = pending_order.coin_name
+        if not pending_order.spot_filled and pending_order.spot_oid:
+            try:
+                spot_pair = self._get_spot_pair(coin_name)
+                self.exchange.cancel(spot_pair, pending_order.spot_oid)
+                logger.info(f"已取消 {coin_name} 的現貨 {operation_type} 訂單 {pending_order.spot_oid}")
+            except Exception as e:
+                logger.error(f"取消 {coin_name} 的現貨 {operation_type} 訂單時發生錯誤: {e}")
+        
+        if not pending_order.perp_filled and pending_order.perp_oid:
+            try:
+                self.exchange.cancel(coin_name, pending_order.perp_oid)
+                logger.info(f"已取消 {coin_name} 的永續合約 {operation_type} 訂單 {pending_order.perp_oid}")
+            except Exception as e:
+                logger.error(f"取消 {coin_name} 的永續合約 {operation_type} 訂單時發生錯誤: {e}")
+
+    def _get_spot_pair(self, coin_name: str) -> str:
+        """Helper to get the correct spot pair name."""
+        if coin_name == "BTC":
+            spot_name = "UBTC"
+        elif coin_name == "ETH":
+            spot_name = "UETH"
+        else:
+            spot_name = coin_name
+        return f"{spot_name}/USDC"
+
+    async def _relist_unfilled_orders(self, pending_order: PendingDeltaOrder):
+        """Helper to re-place orders for the unfilled legs of a pending order."""
+        coin_name = pending_order.coin_name
+        is_closing = pending_order.is_closing_position
+
+        try:
+            l2_book = self.info.l2_snapshot(coin_name)
+            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
+                logger.error(f"無法取得 {coin_name} 的 L2 訂單簿以重新掛單。")
+                return
+
+            best_bid = float(l2_book["levels"][0][0]['px'])
+            best_ask = float(l2_book["levels"][1][0]['px'])
+
+            # Re-place spot order if not filled
+            if not pending_order.spot_filled:
+                _, _, spot_size, _ = self.has_delta_neutral_position(coin_name)
+                if spot_size > 0:
+                    spot_pair = self._get_spot_pair(coin_name)
+                    side = not is_closing # Buy if opening, Sell if closing
+                    price = best_bid if side else best_ask
+                    rounded_price = self.round_price(coin_name, price)
+                    rounded_size = self.round_size(coin_name, True, spot_size)
+                    
+                    logger.info(f"重新掛單現貨 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
+                    result = self.exchange.order(spot_pair, side, rounded_size, rounded_price, {"limit": {"tif": "Alo"}})
+                    # Update oid
+                    if result and result.get('status') == 'ok':
+                        response = result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
+                        if 'resting' in response:
+                            pending_order.spot_oid = int(response['resting']['oid'])
+
+            # Re-place perp order if not filled
+            if not pending_order.perp_filled:
+                _, perp_size, _, _ = self.has_delta_neutral_position(coin_name)
+                if perp_size != 0:
+                    side = is_closing # Buy if closing, Sell if opening
+                    price = best_bid if side else best_ask
+                    rounded_price = self.round_price(coin_name, price)
+                    rounded_size = self.round_size(coin_name, False, abs(perp_size))
+
+                    logger.info(f"重新掛單永續合約 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
+                    result = self.exchange.order(coin_name, side, rounded_size, rounded_price, {"limit": {"tif": "Alo"}})
+                    # Update oid
+                    if result and result.get('status') == 'ok':
+                        response = result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
+                        if 'resting' in response:
+                            pending_order.perp_oid = int(response['resting']['oid'])
+
+        except Exception as e:
+            logger.error(f"重新掛單 {coin_name} 的訂單時發生錯誤: {e}")
     
     def close_delta_position(self, coin_name):
         if coin_name not in self.coins:
-            logger.warning(f"Coin {coin_name} not found in tracked coins")
+            logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
             return False
         
         coin_info = self.coins[coin_name]
         
         if not (coin_info.perp and coin_info.spot):
-            logger.warning(f"{coin_name} doesn't have both perp and spot markets")
+            logger.warning(f"{coin_name} 沒有同時擁有永續合約和現貨市場")
             return False
         
         try:
@@ -662,21 +715,29 @@ class Delta:
             is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
             
             if not is_delta_neutral:
-                logger.warning(f"No delta-neutral position for {coin_name} to close")
+                logger.warning(f"沒有 {coin_name} 的 Delta 中性部位可供關閉")
                 return False
             
-            price = self._get_spot_price(coin_name)
-            if price <= 0:
-                logger.error(f"Invalid price for {coin_name}: {price}")
+            # Get L2 book data to find best bid and ask
+            l2_book = self.info.l2_snapshot(coin_name)
+            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
+                logger.error(f"無法取得 {coin_name} 的 L2 訂單簿")
                 return False
             
+            best_bid = float(l2_book["levels"][0][0]['px'])
+            best_ask = float(l2_book["levels"][1][0]['px'])
+
+            # Check for a reasonable spread
+            spread = (best_ask - best_bid) / best_ask
+            if spread > 0.01: # If spread is > 1%, it might be too risky
+                 logger.warning(f"{coin_name} 的價差過大 ({spread:.2%})，跳過下單。")
+                 return False
+
             # For closing, we reverse the orders:
-            # - Sell the spot position
-            # - Buy back (cover) the short perp position
-            
-            tick_size = coin_info.spot.tick_size
-            spot_limit_price = self.round_price(coin_name, price - tick_size)  # Sell slightly below market
-            perp_limit_price = self.round_price(coin_name, price + tick_size)  # Buy slightly above market
+            # - Sell the spot position at the best ask
+            # - Buy back (cover) the short perp position at the best bid
+            spot_limit_price = self.round_price(coin_name, best_ask)
+            perp_limit_price = self.round_price(coin_name, best_bid)
             
             # Create a new pending order to track
             pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=True)
@@ -692,13 +753,13 @@ class Delta:
                 
                 # Ensure positive size and proper rounding
                 if available_spot_size <= 0:
-                    logger.warning(f"No available balance for {coin_name} - total: {spot_size}, hold: {coin_info.spot.position.get('hold', 0)}")
+                    logger.warning(f"{coin_name} 沒有可用的餘額 - 總計: {spot_size}, 凍結: {coin_info.spot.position.get('hold', 0)}")
                     return False
                 
                 # Round to the proper number of decimals for this spot market
                 rounded_spot_size = self.round_size(coin_name, True, available_spot_size)
                 
-                logger.info(f"Creating spot sell limit order for {coin_name}: {rounded_spot_size} @ {spot_limit_price} (from available: {available_spot_size})")
+                logger.info(f"正在建立 {coin_name} 的現貨限價賣單: {rounded_spot_size} @ {spot_limit_price} (僅掛單)")
                 
                 if coin_name == "BTC":
                     spot_name = "UBTC"
@@ -710,18 +771,18 @@ class Delta:
                 spot_pair = f"{spot_name}/USDC"
                 
                 # For sell orders, side is False (sell)
-                spot_order_result = self.exchange.order(spot_pair, False, rounded_spot_size, spot_limit_price, {"limit": {"tif": "Gtc"}})
-                logger.info(f"Spot sell order result: {spot_order_result}")
+                spot_order_result = self.exchange.order(spot_pair, False, rounded_spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
+                logger.info(f"現貨賣單結果: {spot_order_result}")
             
             # For perp, we need to buy back our short position
             if perp_size < 0:
                 # Convert negative size to positive for buy order
                 buy_size = abs(perp_size)
-                logger.info(f"Creating perp buy limit order to close short for {coin_name}: {buy_size} @ {perp_limit_price}")
+                logger.info(f"正在建立 {coin_name} 的永續合約限價買單以平倉: {buy_size} @ {perp_limit_price} (僅掛單)")
                 
                 # For buy orders, side is True (buy)
-                perp_order_result = self.exchange.order(coin_name, True, buy_size, perp_limit_price, {"limit": {"tif": "Gtc"}})
-                logger.info(f"Perp buy order result: {perp_order_result}")
+                perp_order_result = self.exchange.order(coin_name, True, buy_size, perp_limit_price, {"limit": {"tif": "Alo"}})
+                logger.info(f"永續合約買單結果: {perp_order_result}")
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -733,12 +794,12 @@ class Delta:
             )
             
         except Exception as e:
-            logger.error(f"Error closing delta-neutral position for {coin_name}: {e}")
+            logger.error(f"關閉 {coin_name} 的 Delta 中性部位時發生錯誤: {e}")
             return False
     
     async def close_all_delta_positions(self):
         """Close all active delta-neutral positions across all tracked coins."""
-        logger.info("Attempting to close all delta-neutral positions...")
+        logger.info("正在嘗試關閉所有 Delta 中性部位...")
         
         closed_positions = 0
         for coin_name in self.tracked_coins:
@@ -747,48 +808,124 @@ class Delta:
                 
             is_delta_neutral, _, _, _ = self.has_delta_neutral_position(coin_name)
             if is_delta_neutral:
-                logger.info(f"Closing delta-neutral position for {coin_name}...")
+                logger.info(f"正在關閉 {coin_name} 的 Delta 中性部位...")
                 result = self.close_delta_position(coin_name)
                 if result:
-                    logger.info(f"Successfully closed delta-neutral position for {coin_name}")
+                    logger.info(f"成功關閉 {coin_name} 的 Delta 中性部位")
                     closed_positions += 1
                 else:
-                    logger.warning(f"Failed to close delta-neutral position for {coin_name}")
+                    logger.warning(f"關閉 {coin_name} 的 Delta 中性部位失敗")
         
         if closed_positions > 0:
-            logger.info(f"Successfully closed {closed_positions} delta-neutral positions")
+            logger.info(f"成功關閉 {closed_positions} 個 Delta 中性部位")
         else:
-            logger.info("No delta-neutral positions were closed")
+            logger.info("沒有 Delta 中性部位被關閉")
             
         return closed_positions > 0
     
     async def exit_program(self, close_positions=True):
         """Exit the program and optionally close all positions."""
-        logger.info("Exiting program...")
+        logger.info("正在退出程式...")
         
         # Set running state to False
         self._is_running = False
         
         if close_positions:
-            logger.info("Closing all positions...")
+            logger.info("正在關閉所有部位...")
             await self.close_all_delta_positions()
         
-        logger.info("Exited")
+        logger.info("已退出")
         return True
             
     async def execute_best_delta_strategy(self):
         best_coin = self.get_best_yearly_funding_rate()
         if not best_coin:
-            logger.warning("No coin with positive funding rate found")
+            logger.warning("找不到資金費率為正的幣種")
             return False
             
         is_delta_neutral, _, _, _ = self.has_delta_neutral_position(best_coin)
         if is_delta_neutral:
-            logger.info(f"Already have delta-neutral position for {best_coin}")
+            logger.info(f"已持有 {best_coin} 的 Delta 中性部位")
             return False
             
-        logger.info(f"Creating delta-neutral position for {best_coin} with best funding rate: {self.coins[best_coin].perp.yearly_funding_rate:.4f}%")
+        logger.info(f"正在為 {best_coin} 建立 Delta 中性部位，其資金費率最佳: {self.coins[best_coin].perp.yearly_funding_rate:.4f}%")
         return await self.create_delta_position(best_coin)
+
+    async def check_and_rebalance_positions(self):
+        """Check all active positions and rebalance them if they have drifted from delta neutral."""
+        if not self.config["allocation"].get("auto_rebalance", False):
+            return
+
+        logger.debug("正在檢查部位以進行再平衡...")
+        for coin_name in self.coins:
+            is_delta_neutral, perp_size, spot_size, diff_percentage = self.has_delta_neutral_position(coin_name)
+
+            if not is_delta_neutral:
+                continue
+
+            # Calculate the current value of both legs
+            spot_price = self._get_spot_price(coin_name)
+            perp_price = self._get_perp_price(coin_name)
+            if spot_price == 0 or perp_price == 0:
+                logger.warning(f"無法取得 {coin_name} 的價格以進行再平衡")
+                continue
+
+            spot_value = spot_size * spot_price
+            perp_value = abs(perp_size) * perp_price
+            
+            value_diff_pct = abs(spot_value - perp_value) / max(spot_value, perp_value)
+
+            if value_diff_pct > self.rebalance_threshold:
+                logger.info(f"{Colors.YELLOW}{coin_name} 的部位已偏離中性超過閾值 ({value_diff_pct:.2%} > {self.rebalance_threshold:.2%})。正在啟動再平衡...{Colors.RESET}")
+                await self._execute_rebalance_orders(coin_name, spot_value, perp_value, spot_price, perp_price)
+
+    async def _execute_rebalance_orders(self, coin_name: str, spot_value: float, perp_value: float, spot_price: float, perp_price: float):
+        """Executes the specific orders to bring a position back to neutral."""
+        try:
+            value_to_adjust = abs(spot_value - perp_value) / 2
+            
+            if spot_value > perp_value:
+                # Sell spot, Buy (cover) perp
+                adjustment_size_spot = self.round_size(coin_name, True, value_to_adjust / spot_price)
+                adjustment_size_perp = self.round_size(coin_name, False, value_to_adjust / perp_price)
+                
+                logger.info(f"再平衡 {coin_name}: 賣出現貨 {adjustment_size_spot}, 買入永續合約 {adjustment_size_perp}")
+
+                # Get best prices for maker orders
+                l2_book = self.info.l2_snapshot(coin_name)
+                best_bid = float(l2_book["levels"][0][0]['px'])
+                best_ask = float(l2_book["levels"][1][0]['px'])
+
+                # Place spot sell order
+                spot_pair = self._get_spot_pair(coin_name)
+                self.exchange.order(spot_pair, False, adjustment_size_spot, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+                
+                # Place perp buy order
+                self.exchange.order(coin_name, True, adjustment_size_perp, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+
+            else: # perp_value > spot_value
+                # Buy spot, Sell (open) perp
+                adjustment_size_spot = self.round_size(coin_name, True, value_to_adjust / spot_price)
+                adjustment_size_perp = self.round_size(coin_name, False, value_to_adjust / perp_price)
+
+                logger.info(f"再平衡 {coin_name}: 買入現貨 {adjustment_size_spot}, 賣出永續合約 {adjustment_size_perp}")
+
+                # Get best prices for maker orders
+                l2_book = self.info.l2_snapshot(coin_name)
+                best_bid = float(l2_book["levels"][0][0]['px'])
+                best_ask = float(l2_book["levels"][1][0]['px'])
+
+                # Place spot buy order
+                spot_pair = self._get_spot_pair(coin_name)
+                self.exchange.order(spot_pair, True, adjustment_size_spot, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+
+                # Place perp sell order
+                self.exchange.order(coin_name, False, adjustment_size_perp, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+            
+            logger.info(f"已為 {coin_name} 送出再平衡訂單。")
+
+        except Exception as e:
+            logger.error(f"執行 {coin_name} 的再平衡訂單時發生錯誤: {e}")
     
     def check_allocation(self):
         ratio = self.spot_perp_repartition()
@@ -799,48 +936,48 @@ class Delta:
             spot_value = self._get_total_spot_account_value()
             perp_value = self.perp_user_state
             amount_to_transfer = (perp_value * self.spot_allocation_pct - spot_value * self.perp_allocation_pct) / 1.0
-            logger.info(f"Allocation mismatch: {ratio:.2f} (target: {self.spot_allocation_pct:.2f})")
-            logger.info(f"Recommended transfer from perp to spot: ${amount_to_transfer:.2f}")
+            logger.info(f"資金分配不匹配: {ratio:.2f} (目標: {self.spot_allocation_pct:.2f})")
+            logger.info(f"建議從永續合約轉帳至現貨: ${amount_to_transfer:.2f}")
             return False
         elif ratio > upper_bound:
             spot_value = self._get_total_spot_account_value()
             perp_value = self.perp_user_state
             amount_to_transfer = (spot_value * self.perp_allocation_pct - perp_value * self.spot_allocation_pct) / 1.0
-            logger.info(f"Allocation mismatch: {ratio:.2f} (target: {self.spot_allocation_pct:.2f})")
-            logger.info(f"Recommended transfer from spot to perp: ${amount_to_transfer:.2f}")
+            logger.info(f"資金分配不匹配: {ratio:.2f} (目標: {self.spot_allocation_pct:.2f})")
+            logger.info(f"建議從現貨轉帳至永續合約: ${amount_to_transfer:.2f}")
             return False
         return True
     
     def display_position_info(self):
         """Display detailed information about tracked coins and positions."""
-        logger.info(f"\n{Colors.BOLD}Tracked Coins Information:{Colors.RESET}")
+        logger.info(f"\n{Colors.BOLD}追蹤幣種資訊:{Colors.RESET}")
         for coin_name, coin_info in self.coins.items():
             if coin_name == "USDC":
                 continue
                 
-            logger.info(f"\n{Colors.BOLD}{Colors.YELLOW}{coin_name} Markets:{Colors.RESET}")
+            logger.info(f"\n{Colors.BOLD}{Colors.YELLOW}{coin_name} 市場:{Colors.RESET}")
             
             is_delta_neutral, perp_size, spot_size, diff_percentage = self.has_delta_neutral_position(coin_name)
             
             status_color = Colors.GREEN if is_delta_neutral else Colors.RED
-            status_text = "✅ DELTA NEUTRAL" if is_delta_neutral else "❌ NOT DELTA NEUTRAL"
-            logger.info(f"  Delta Status: {status_color}{status_text}{Colors.RESET}")
+            status_text = "✅ Delta 中性" if is_delta_neutral else "❌ 非 Delta 中性"
+            logger.info(f"  Delta 狀態: {status_color}{status_text}{Colors.RESET}")
             
             if perp_size != 0 or spot_size != 0:
-                logger.info(f"    Perp Size: {Colors.BLUE}{perp_size:.4f}{Colors.RESET}")
-                logger.info(f"    Spot Size: {Colors.GREEN}{spot_size:.4f}{Colors.RESET}")
+                logger.info(f"    永續合約規模: {Colors.BLUE}{perp_size:.4f}{Colors.RESET}")
+                logger.info(f"    現貨規模: {Colors.GREEN}{spot_size:.4f}{Colors.RESET}")
                 diff_color = Colors.GREEN if diff_percentage < 5 else Colors.YELLOW if diff_percentage < 10 else Colors.RED
-                logger.info(f"    Difference: {diff_color}{diff_percentage:.2f}%{Colors.RESET}")
+                logger.info(f"    差異: {diff_color}{diff_percentage:.2f}%{Colors.RESET}")
             
             if coin_info.perp:
-                logger.info(f"    {Colors.BOLD}Perpetual Market:{Colors.RESET}")
-                logger.info(f"      Index: {coin_info.perp.index}")
-                logger.info(f"      Size Decimals: {coin_info.perp.sz_decimals}")
-                logger.info(f"      Max Leverage: {coin_info.perp.max_leverage}x")
-                logger.info(f"      Tick Size: {coin_info.perp.tick_size}")
+                logger.info(f"    {Colors.BOLD}永續合約市場:{Colors.RESET}")
+                logger.info(f"      指數: {coin_info.perp.index}")
+                logger.info(f"      規模小數位數: {coin_info.perp.sz_decimals}")
+                logger.info(f"      最大槓桿: {coin_info.perp.max_leverage}x")
+                logger.info(f"      價格跳動單位: {coin_info.perp.tick_size}")
                 
                 if coin_info.perp.funding_rate is not None:
-                    logger.info(f"      Current Funding Rate: {Colors.GREEN}{coin_info.perp.funding_rate:.8f}{Colors.RESET}")
+                    logger.info(f"      當前資金費率: {Colors.GREEN}{coin_info.perp.funding_rate:.8f}{Colors.RESET}")
                     
                     # Color funding rate based on value
                     rate_color = Colors.RED
@@ -851,46 +988,46 @@ class Delta:
                     elif coin_info.perp.yearly_funding_rate >= 5:
                         rate_color = Colors.YELLOW
                         
-                    logger.info(f"      Yearly Funding Rate: {rate_color}{coin_info.perp.yearly_funding_rate:.4f}%{Colors.RESET}")
+                    logger.info(f"      年化資金費率: {rate_color}{coin_info.perp.yearly_funding_rate:.4f}%{Colors.RESET}")
                 
                 if coin_info.perp.position:
                     pos = coin_info.perp.position
-                    logger.info(f"      Position: {Colors.BLUE}{pos['size']:.4f}{Colors.RESET} @ ${Colors.YELLOW}{pos['entry_price']:.2f}{Colors.RESET}")
-                    logger.info(f"      Position Value: ${Colors.GREEN}{pos['position_value']:.2f}{Colors.RESET}")
+                    logger.info(f"      部位: {Colors.BLUE}{pos['size']:.4f}{Colors.RESET} @ ${Colors.YELLOW}{pos['entry_price']:.2f}{Colors.RESET}")
+                    logger.info(f"      部位價值: ${Colors.GREEN}{pos['position_value']:.2f}{Colors.RESET}")
                     
                     # Color PnL based on profit/loss
                     pnl_color = Colors.GREEN if pos['unrealized_pnl'] > 0 else Colors.RED
-                    logger.info(f"      Unrealized PnL: {pnl_color}${pos['unrealized_pnl']:.2f}{Colors.RESET}")
+                    logger.info(f"      未實現損益: {pnl_color}${pos['unrealized_pnl']:.2f}{Colors.RESET}")
                     
-                    logger.info(f"      Leverage: {Colors.YELLOW}{pos['leverage']}x{Colors.RESET}")
-                    logger.info(f"      Liquidation Price: ${Colors.RED}{pos['liquidation_price']:.2f}{Colors.RESET}")
-                    logger.info(f"      Cumulative Funding: {pos['cum_funding']}")
+                    logger.info(f"      槓桿: {Colors.YELLOW}{pos['leverage']}x{Colors.RESET}")
+                    logger.info(f"      強平價格: ${Colors.RED}{pos['liquidation_price']:.2f}{Colors.RESET}")
+                    logger.info(f"      累計資金費用: {pos['cum_funding']}")
                 else:
-                    logger.info(f"      Position: {Colors.RED}None{Colors.RESET}")
+                    logger.info(f"      部位: {Colors.RED}無{Colors.RESET}")
             
             if coin_info.spot:
-                logger.info(f"    {Colors.BOLD}Spot Market:{Colors.RESET}")
-                logger.info(f"      Name: {coin_info.spot.name} ({coin_info.spot.full_name})")
-                logger.info(f"      Token ID: {coin_info.spot.token_id}")
-                logger.info(f"      Index: {coin_info.spot.index}")
-                logger.info(f"      Size Decimals: {coin_info.spot.sz_decimals}")
-                logger.info(f"      Wei Decimals: {coin_info.spot.wei_decimals}")
-                logger.info(f"      Tick Size: {coin_info.spot.tick_size}")
+                logger.info(f"    {Colors.BOLD}現貨市場:{Colors.RESET}")
+                logger.info(f"      名稱: {coin_info.spot.name} ({coin_info.spot.full_name})")
+                logger.info(f"      代幣 ID: {coin_info.spot.token_id}")
+                logger.info(f"      指數: {coin_info.spot.index}")
+                logger.info(f"      規模小數位數: {coin_info.spot.sz_decimals}")
+                logger.info(f"      Wei 小數位數: {coin_info.spot.wei_decimals}")
+                logger.info(f"      價格跳動單位: {coin_info.spot.tick_size}")
                 if coin_info.spot.position:
                     pos = coin_info.spot.position
-                    logger.info(f"      Balance: {Colors.GREEN}{pos['total']:.4f}{Colors.RESET}")
-                    logger.info(f"      On Hold: {Colors.YELLOW}{pos['hold']:.4f}{Colors.RESET}")
-                    logger.info(f"      Entry Value: ${Colors.GREEN}{pos['entry_ntl']:.2f}{Colors.RESET}")
+                    logger.info(f"      餘額: {Colors.GREEN}{pos['total']:.4f}{Colors.RESET}")
+                    logger.info(f"      凍結中: {Colors.YELLOW}{pos['hold']:.4f}{Colors.RESET}")
+                    logger.info(f"      入場價值: ${Colors.GREEN}{pos['entry_ntl']:.2f}{Colors.RESET}")
                 else:
-                    logger.info(f"      Position: {Colors.RED}None{Colors.RESET}")
+                    logger.info(f"      部位: {Colors.RED}無{Colors.RESET}")
         
         ratio = self.spot_perp_repartition()
         ratio_color = Colors.GREEN if 0.665 <= ratio <= 0.735 else Colors.YELLOW if 0.6 <= ratio <= 0.8 else Colors.RED
-        logger.info(f"Spot Perp Repartition: {ratio_color}{ratio:.4f}{Colors.RESET} (target: {Colors.GREEN}0.7{Colors.RESET})")
+        logger.info(f"現貨/永續合約分配比例: {ratio_color}{ratio:.4f}{Colors.RESET} (目標: {Colors.GREEN}0.7{Colors.RESET})")
         
         allocation_ok = self.check_allocation()
         if allocation_ok == False:
-            logger.info(f"{Colors.RED}Portfolio allocation is not within target ratio (70% spot / 30% perp){Colors.RESET}")
+            logger.info(f"{Colors.RED}投資組合分配未在目標比例內 (70% 現貨 / 30% 永續合約){Colors.RESET}")
         
         # Show the best funding rate coin (but don't try to create a position here)
         best_coin = self.get_best_yearly_funding_rate()
@@ -904,7 +1041,7 @@ class Delta:
             elif rate >= 5:
                 rate_color = Colors.YELLOW
                 
-            logger.info(f"Best funding rate coin: {Colors.YELLOW}{best_coin}{Colors.RESET} with rate {rate_color}{rate:.4f}%{Colors.RESET}")
+            logger.info(f"最佳資金費率幣種: {Colors.YELLOW}{best_coin}{Colors.RESET}，費率為 {rate_color}{rate:.4f}%{Colors.RESET}")
 
     async def check_hourly_funding_rates(self):
         """
@@ -919,7 +1056,7 @@ class Delta:
             if now.tm_min != 50:
                 return
                 
-            logger.info(f"\n{Colors.BOLD}Running scheduled check for better funding rates (10 minutes before the hour){Colors.RESET}")
+            logger.info(f"\n{Colors.BOLD}正在執行每小時資金費率檢查 (整點前 10 分鐘){Colors.RESET}")
             
             # Get current funding rates
             from test_market_data import check_funding_rates, calculate_yearly_funding_rates
@@ -942,7 +1079,7 @@ class Delta:
                         rate_color = Colors.GREEN
                     elif rate >= 5:
                         rate_color = Colors.YELLOW
-                    logger.info(f"Updated {Colors.YELLOW}{coin_name}{Colors.RESET} yearly funding rate: {rate_color}{rate:.4f}%{Colors.RESET}")
+                    logger.info(f"已更新 {Colors.YELLOW}{coin_name}{Colors.RESET} 的年化資金費率: {rate_color}{rate:.4f}%{Colors.RESET}")
             
             # Refresh user state to get latest positions
             try:
@@ -982,13 +1119,13 @@ class Delta:
                                 "entry_ntl": float(balance["entryNtl"])
                             }
                             
-                logger.info(f"{Colors.GREEN}Successfully refreshed position data{Colors.RESET}")
+                logger.info(f"{Colors.GREEN}成功刷新部位資料{Colors.RESET}")
                 
                 # Display detailed position information in hourly check
                 self.display_position_info()
                 
             except Exception as e:
-                logger.error(f"{Colors.RED}Error refreshing position data: {e}{Colors.RESET}")
+                logger.error(f"{Colors.RED}刷新部位資料時發生錯誤: {e}{Colors.RESET}")
             
             # Find current active delta neutral position
             current_position_coin = None
@@ -999,18 +1136,18 @@ class Delta:
                 is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
                 if is_delta_neutral:
                     current_position_coin = coin_name
-                    logger.info(f"{Colors.GREEN}Found active delta-neutral position on {Colors.YELLOW}{coin_name}{Colors.GREEN} with perp size {Colors.BLUE}{perp_size}{Colors.GREEN} and spot size {Colors.GREEN}{spot_size}{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}找到活躍的 Delta 中性部位於 {Colors.YELLOW}{coin_name}{Colors.GREEN}，永續合約規模 {Colors.BLUE}{perp_size}{Colors.GREEN}，現貨規模 {Colors.GREEN}{spot_size}{Colors.RESET}")
                     break
             
             if not current_position_coin:
-                logger.info(f"{Colors.YELLOW}No active delta-neutral position found.{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}未找到活躍的 Delta 中性部位。{Colors.RESET}")
                 # Find the best coin and create a new position if its rate is >= 5%
                 best_coin = self.get_best_yearly_funding_rate()
                 if best_coin and self.coins[best_coin].perp.yearly_funding_rate >= 5.0:
-                    logger.info(f"{Colors.GREEN}Creating new delta-neutral position for {Colors.YELLOW}{best_coin}{Colors.GREEN} with rate {Colors.GREEN}{self.coins[best_coin].perp.yearly_funding_rate:.4f}%{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}正在為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立新的 Delta 中性部位，費率為 {Colors.GREEN}{self.coins[best_coin].perp.yearly_funding_rate:.4f}%{Colors.RESET}")
                     await self.create_delta_position(best_coin)
                 else:
-                    logger.info(f"{Colors.YELLOW}No coin with funding rate >= 5% found. Waiting until next check.{Colors.RESET}")
+                    logger.info(f"{Colors.YELLOW}找不到資金費率 >= 5% 的幣種。等待下次檢查。{Colors.RESET}")
                 return
             
             # Check if current position has yield < 5%
@@ -1023,21 +1160,21 @@ class Delta:
             elif current_yield >= 5:
                 rate_color = Colors.YELLOW
                 
-            logger.info(f"Current delta-neutral position: {Colors.YELLOW}{current_position_coin}{Colors.RESET} with yield: {rate_color}{current_yield:.4f}%{Colors.RESET}")
+            logger.info(f"當前 Delta 中性部位: {Colors.YELLOW}{current_position_coin}{Colors.RESET}，收益率: {rate_color}{current_yield:.4f}%{Colors.RESET}")
             
             if current_yield is None or current_yield < 5.0:
-                logger.info(f"{Colors.YELLOW}Current yield for {current_position_coin} is below 5% (or None). Looking for better options...{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}{current_position_coin} 的當前收益率低於 5% (或為空)。正在尋找更好的選擇...{Colors.RESET}")
                 
                 # Find coin with highest funding rate
                 best_coin = self.get_best_yearly_funding_rate()
                 
                 if not best_coin or (best_coin and self.coins[best_coin].perp.yearly_funding_rate < 5.0):
-                    logger.info(f"{Colors.YELLOW}No coin with funding rate >= 5% found. Keeping current position for now.{Colors.RESET}")
+                    logger.info(f"{Colors.YELLOW}找不到資金費率 >= 5% 的幣種。暫時維持當前部位。{Colors.RESET}")
                     return
                 
                 # Make sure the best coin is different from current coin and has better rate
                 if best_coin == current_position_coin:
-                    logger.info(f"{Colors.YELLOW}{current_position_coin} still has the best funding rate but it's below 5%.{Colors.RESET}")
+                    logger.info(f"{Colors.YELLOW}{current_position_coin} 仍然是最佳資金費率幣種，但其費率低於 5%。{Colors.RESET}")
                     return
                     
                 best_rate = self.coins[best_coin].perp.yearly_funding_rate
@@ -1049,21 +1186,21 @@ class Delta:
                 elif best_rate >= 5:
                     best_rate_color = Colors.YELLOW
                     
-                logger.info(f"{Colors.GREEN}Found better coin: {Colors.YELLOW}{best_coin}{Colors.GREEN} with yield: {best_rate_color}{best_rate:.4f}%{Colors.RESET}")
+                logger.info(f"{Colors.GREEN}找到更好的幣種: {Colors.YELLOW}{best_coin}{Colors.GREEN}，收益率: {best_rate_color}{best_rate:.4f}%{Colors.RESET}")
                 
                 # Close current position and open new one
-                logger.info(f"{Colors.YELLOW}Closing current position on {current_position_coin}...{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}正在關閉 {current_position_coin} 的當前部位...{Colors.RESET}")
                 close_result = self.close_delta_position(current_position_coin)
                 
                 if close_result:
-                    logger.info(f"{Colors.GREEN}Successfully initiated closing of position on {current_position_coin}{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}已成功啟動關閉 {current_position_coin} 部位的程序{Colors.RESET}")
                     # Wait for closing orders to be processed
                     close_pending = True
                     max_wait = 180  # 3 minutes max wait
                     start_time = time.time()
                     
                     while close_pending and time.time() - start_time < max_wait:
-                        logger.info(f"{Colors.YELLOW}Waiting for closing orders to complete...{Colors.RESET}")
+                        logger.info(f"{Colors.YELLOW}正在等待關倉訂單完成...{Colors.RESET}")
                         # Check pending orders
                         await self.check_pending_orders()
                         
@@ -1074,48 +1211,48 @@ class Delta:
                             await asyncio.sleep(10)  # Wait 10 seconds before checking again
                     
                     if close_pending:
-                        logger.warning(f"{Colors.YELLOW}Closing position on {current_position_coin} is taking too long. Will continue with opening new position.{Colors.RESET}")
+                        logger.warning(f"{Colors.YELLOW}關閉 {current_position_coin} 的部位耗時過長。將繼續開立新部位。{Colors.RESET}")
                     
-                    logger.info(f"{Colors.GREEN}Creating new delta-neutral position for {best_coin}...{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}正在為 {best_coin} 建立新的 Delta 中性部位...{Colors.RESET}")
                     create_result = await self.create_delta_position(best_coin)
                     
                     if create_result:
-                        logger.info(f"{Colors.GREEN}Successfully initiated new delta-neutral position on {best_coin}{Colors.RESET}")
+                        logger.info(f"{Colors.GREEN}已成功啟動建立 {best_coin} 新 Delta 中性部位的程序{Colors.RESET}")
                     else:
-                        logger.error(f"{Colors.RED}Failed to create new delta-neutral position on {best_coin}{Colors.RESET}")
+                        logger.error(f"{Colors.RED}建立 {best_coin} 新 Delta 中性部位失敗{Colors.RESET}")
                 else:
-                    logger.error(f"{Colors.RED}Failed to close position on {current_position_coin}{Colors.RESET}")
+                    logger.error(f"{Colors.RED}關閉 {current_position_coin} 部位失敗{Colors.RESET}")
             else:
-                logger.info(f"{Colors.GREEN}Current yield for {current_position_coin} is above 5%. No action needed.{Colors.RESET}")
+                logger.info(f"{Colors.GREEN}{current_position_coin} 的當前收益率高於 5%。無需操作。{Colors.RESET}")
                 
         except Exception as e:
-            logger.error(f"{Colors.RED}Error checking hourly funding rates: {e}{Colors.RESET}", exc_info=True)
+            logger.error(f"{Colors.RED}檢查每小時資金費率時發生錯誤: {e}{Colors.RESET}", exc_info=True)
     
     async def stop(self):
         """Stop the bot's execution loop."""
         if not self._is_running:
-            logger.info("Bot is not running")
+            logger.info("機器人未在運行")
             return
             
-        logger.info("Stopping Delta bot...")
+        logger.info("正在停止 Delta 機器人...")
         self._is_running = False
 
     async def start(self):
         """Start the bot's execution loop."""
         if self._is_running:
-            logger.info("Bot is already running")
+            logger.info("機器人已在運行中")
             return
             
         self._is_running = True
-        logger.info("Starting Delta bot...")
+        logger.info("正在啟動 Delta 機器人...")
         
-        logger.info(f"{Colors.BOLD}Account Summary:{Colors.RESET}")
-        logger.info(f"  Total Value: ${Colors.GREEN}{self.total_raw_usd:.2f}{Colors.RESET}")
-        logger.info(f"  Account Value: ${Colors.GREEN}{self.account_value:.2f}{Colors.RESET}")
-        logger.info(f"  Margin Used: ${Colors.YELLOW}{self.total_margin_used:.2f}{Colors.RESET}")
-        logger.info(f"  Perp Account Value: ${Colors.BLUE}{self.perp_user_state:.2f}{Colors.RESET}")
-        logger.info(f"  Spot USDC Value: ${Colors.GREEN}{self._get_spot_account_USDC():.2f}{Colors.RESET}")
-        logger.info(f"  Spot Account Value: ${Colors.BLUE}{self._get_total_spot_account_value():.2f}{Colors.RESET}")
+        logger.info(f"{Colors.BOLD}帳戶摘要:{Colors.RESET}")
+        logger.info(f"  總價值: ${Colors.GREEN}{self.total_raw_usd:.2f}{Colors.RESET}")
+        logger.info(f"  帳戶價值: ${Colors.GREEN}{self.account_value:.2f}{Colors.RESET}")
+        logger.info(f"  已用保證金: ${Colors.YELLOW}{self.total_margin_used:.2f}{Colors.RESET}")
+        logger.info(f"  永續合約帳戶價值: ${Colors.BLUE}{self.perp_user_state:.2f}{Colors.RESET}")
+        logger.info(f"  現貨 USDC 價值: ${Colors.GREEN}{self._get_spot_account_USDC():.2f}{Colors.RESET}")
+        logger.info(f"  現貨帳戶價值: ${Colors.BLUE}{self._get_total_spot_account_value():.2f}{Colors.RESET}")
         
         from test_market_data import check_funding_rates, calculate_yearly_funding_rates
         
@@ -1134,7 +1271,7 @@ class Delta:
         
         allocation_ok = self.check_allocation()
         if allocation_ok == False:
-            logger.info(f"{Colors.RED}Portfolio allocation is not within target ratio (70% spot / 30% perp){Colors.RESET}")
+            logger.info(f"{Colors.RED}投資組合分配未在目標比例內 (70% 現貨 / 30% 永續合約){Colors.RESET}")
         
         # Check if we should create a new delta-neutral position
         best_coin = self.get_best_yearly_funding_rate()
@@ -1148,7 +1285,7 @@ class Delta:
             elif rate >= 5:
                 rate_color = Colors.YELLOW
                 
-            logger.info(f"{Colors.YELLOW}Best funding rate coin for new position: {Colors.YELLOW}{best_coin} with rate {rate_color}{rate:.4f}%{Colors.RESET}")
+            logger.info(f"{Colors.YELLOW}新部位的最佳資金費率幣種: {Colors.YELLOW}{best_coin}，費率為 {rate_color}{rate:.4f}%{Colors.RESET}")
             
             # First check if we have any existing delta-neutral positions we need to close
             existing_positions_found = False
@@ -1159,13 +1296,13 @@ class Delta:
                 is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
                 if is_delta_neutral:
                     existing_positions_found = True
-                    logger.info(f"{Colors.YELLOW}Found existing delta-neutral position on {Colors.BLUE}{coin_name}{Colors.YELLOW}, closing before creating new position{Colors.RESET}")
+                    logger.info(f"{Colors.YELLOW}在 {Colors.BLUE}{coin_name}{Colors.YELLOW} 上發現現有的 Delta 中性部位，將在建立新部位前關閉{Colors.RESET}")
                     close_result = self.close_delta_position(coin_name)
                     if close_result:
-                        logger.info(f"{Colors.GREEN}Successfully initiated closing of existing position on {Colors.BLUE}{coin_name}{Colors.RESET}")
+                        logger.info(f"{Colors.GREEN}已成功啟動關閉 {Colors.BLUE}{coin_name}{Colors.GREEN} 上現有部位的程序{Colors.RESET}")
                     else:
-                        logger.warning(f"{Colors.RED}Failed to close existing position on {Colors.BLUE}{coin_name}{Colors.RESET}")
-                        logger.warning(f"{Colors.RED}Skipping creation of new position until existing positions are closed{Colors.RESET}")
+                        logger.warning(f"{Colors.RED}關閉 {Colors.BLUE}{coin_name}{Colors.RED} 上的現有部位失敗{Colors.RESET}")
+                        logger.warning(f"{Colors.RED}在現有部位被關閉前，將跳過建立新部位{Colors.RESET}")
                         break
             
             # Check if best coin already has a position
@@ -1174,18 +1311,18 @@ class Delta:
             # Only proceed if we don't have existing positions or if best coin already has a position
             if (not existing_positions_found or is_delta_neutral) and rate >= 5.0:
                 if not is_delta_neutral:
-                    logger.info(f"{Colors.GREEN}Creating delta-neutral position for {Colors.YELLOW}{best_coin}...{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}正在為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位...{Colors.RESET}")
                     result = await self.execute_best_delta_strategy()
                     if result:
-                        logger.info(f"{Colors.GREEN}Successfully created delta-neutral position for {Colors.YELLOW}{best_coin}{Colors.RESET}")
+                        logger.info(f"{Colors.GREEN}成功為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位{Colors.RESET}")
                     else:
-                        logger.warning(f"{Colors.RED}Failed to create delta-neutral position for {Colors.YELLOW}{best_coin}{Colors.RESET}")
+                        logger.warning(f"{Colors.RED}為 {Colors.YELLOW}{best_coin}{Colors.RED} 建立 Delta 中性部位失敗{Colors.RESET}")
                 else:
-                    logger.info(f"{Colors.GREEN}Already have a delta-neutral position for {Colors.YELLOW}{best_coin}{Colors.RESET}")
+                    logger.info(f"{Colors.GREEN}已持有 {Colors.YELLOW}{best_coin}{Colors.GREEN} 的 Delta 中性部位{Colors.RESET}")
             elif is_delta_neutral:
-                logger.info(f"{Colors.GREEN}Already have a delta-neutral position for {Colors.YELLOW}{best_coin}{Colors.RESET}")
+                logger.info(f"{Colors.GREEN}已持有 {Colors.YELLOW}{best_coin}{Colors.GREEN} 的 Delta 中性部位{Colors.RESET}")
             else:
-                logger.info(f"{Colors.YELLOW}Best funding rate ({rate:.4f}%) is below 5% threshold, not creating position{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}最佳資金費率 ({rate:.4f}%) 低於 5% 的門檻，不建立部位{Colors.RESET}")
 
         # Main loop
         while self._is_running:
@@ -1193,6 +1330,9 @@ class Delta:
                 # Check pending orders
                 await self.check_pending_orders()
                 
+                # Check for and execute rebalancing if needed
+                await self.check_and_rebalance_positions()
+
                 # Check hourly funding rates (runs only at HH:50)
                 await self.check_hourly_funding_rates()
                 
@@ -1201,10 +1341,10 @@ class Delta:
                 # Sleep for a bit - use config refresh interval
                 await asyncio.sleep(self.refresh_interval_sec)
             except KeyboardInterrupt:
-                logger.info(f"{Colors.YELLOW}Keyboard interrupt detected in main loop{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}在主迴圈中偵測到鍵盤中斷{Colors.RESET}")
                 break
             except Exception as e:
-                logger.error(f"{Colors.RED}Error in main loop: {e}{Colors.RESET}", exc_info=True)
+                logger.error(f"{Colors.RED}主迴圈發生錯誤: {e}{Colors.RESET}", exc_info=True)
                 await asyncio.sleep(60)  # Sleep longer on error
 
 
@@ -1220,12 +1360,12 @@ def setup_signal_handlers(delta_instance):
         nonlocal shutdown_in_progress
         
         if shutdown_in_progress:
-            logger.info("Forced exit requested. Exiting immediately.")
+            logger.info("已請求強制退出。立即退出。")
             sys.exit(1)
             
         shutdown_in_progress = True
-        logger.info(f"Received signal {sig}, shutting down...")
-        logger.info("Press Ctrl+C again to force immediate exit")
+        logger.info(f"收到信號 {sig}，正在關閉...")
+        logger.info("再次按下 Ctrl+C 可強制立即退出")
         
         # Don't exit here, just set the flag for the main loop to check
         # The main loop handles the graceful shutdown
@@ -1235,7 +1375,7 @@ def setup_signal_handlers(delta_instance):
     signal.signal(signal.SIGINT, signal_handler)  # Handle Ctrl+C
     signal.signal(signal.SIGTERM, signal_handler)  # Handle termination signal
     
-    logger.info("Signal handlers set up for graceful shutdown")
+    logger.info("已設定信號處理器以實現優雅關閉")
 
 
 async def main():
@@ -1245,23 +1385,23 @@ async def main():
         setup_signal_handlers(delta)
         await delta.start()
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt detected, closing positions...")
+        logger.info("偵測到鍵盤中斷，正在關閉部位...")
         if delta:
             try:
                 # Make sure to close positions before exiting
-                logger.info("Attempting to close all positions...")
+                logger.info("正在嘗試關閉所有部位...")
                 await delta.close_all_delta_positions()
-                logger.info("Position closing complete")
+                logger.info("部位關閉完成")
                 await delta.exit_program(close_positions=False)  # Already closed positions above
             except Exception as e:
-                logger.error(f"Error during shutdown: {e}", exc_info=True)
+                logger.error(f"關閉過程中發生錯誤: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Error running Delta: {e}", exc_info=True)
+        logger.error(f"運行 Delta 時發生錯誤: {e}", exc_info=True)
         if delta:
             try:
                 await delta.exit_program(close_positions=True)
             except Exception as shutdown_e:
-                logger.error(f"Error during shutdown: {shutdown_e}", exc_info=True)
+                logger.error(f"關閉過程中發生錯誤: {shutdown_e}", exc_info=True)
 
 
 if __name__ == "__main__":
@@ -1269,9 +1409,9 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         # This will catch the KeyboardInterrupt at the top level after signal handling
-        logger.info("Exiting due to keyboard interrupt")
+        logger.info("因鍵盤中斷而退出")
     except SystemExit:
         # Handle the SystemExit exception from sys.exit() in the signal handler
         pass
     except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        logger.error(f"致命錯誤: {e}", exc_info=True)

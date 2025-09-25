@@ -168,6 +168,11 @@ docker run -d \
 
 - 首先開啟新的terminal執行 `python entrypoint.py` 來啟動後端 (必須在 `localhost:8080` 上運行)
 - 接著再開啟另外一個terminal，導航到 `frontend` 目錄，然後執行 `npm start` (網址通常是 `http://localhost:3000`)。
+- 為了將前端連接到 API，請在 `frontend` 目錄內創建一個 `.env` 文件，並添加以下行：
+  ```
+  REACT_APP_API_KEY=your_api_key
+  ```
+  如果您的 API 需要金鑰，請將 `your_api_key` 替換為您的實際 API 金鑰。如果 API 不需要金鑰，您可以將其留空。
 
 ## HyperVault 交易生態系統 (即將推出！)
 

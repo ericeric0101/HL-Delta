@@ -63,17 +63,19 @@ Configuration sections:
   - `port`: Port for the API server
   - `enabled`: Whether the API server is enabled
 
-### 2. **Environment Variables** - Required for Authentication
+### 2. **Environment Variables** - Required for Authentication and API Security
 
-These environment variables are used for authentication with HyperLiquid and must be set:
+These environment variables are used for authentication with HyperLiquid and for securing the bot's API. They must be set in your environment or in a `.env` file.
 
-- `HYPERLIQUID_PRIVATE_KEY`: Your private key for trading on HyperLiquid
-- `HYPERLIQUID_ADDRESS`: Your Ethereum address for HyperLiquid
+- `HYPERLIQUID_PRIVATE_KEY`: Your private key for trading on HyperLiquid.
+- `HYPERLIQUID_ADDRESS`: Your Ethereum address for HyperLiquid.
+- `API_SECRET_KEY`: A secret key of your choice to protect the bot's API endpoints. The frontend must use this same key to authenticate.
 
 Example using environment variables:
 ```bash
 export HYPERLIQUID_PRIVATE_KEY={PRIVATE_KEY}
 export HYPERLIQUID_ADDRESS={SUB_ACCOUNT_TRADING_ADDRESS}
+export API_SECRET_KEY={YOUR_SECRET_KEY}
 ```
 
 ## Quick Start
@@ -168,6 +170,11 @@ This project includes a frontend UI to help you track the bot's performance more
 
 - First, open a new terminal and run `python entrypoint.py` to start the backend (must be running on `localhost:8080`).
 - Next, open another terminal, navigate to the `frontend` directory, and run `npm start` (the URL is typically `http://localhost:3000`).
+- To connect the frontend to the API, create a `.env` file inside the `frontend` directory. This file must contain the API key that matches the `API_SECRET_KEY` used by the backend.
+  ```
+  REACT_APP_API_KEY=your_secret_key
+  ```
+  Replace `your_secret_key` with the same value you set for `API_SECRET_KEY` in the backend environment.
 
 ## The HyperVault Trading Ecosystem (Coming Soon!)
 

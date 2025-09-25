@@ -1,28 +1,28 @@
 # HyperVault Delta Bot v1.0.0
 
-A delta-neutral trading bot for HyperLiquid exchange, designed to create and manage delta-neutral positions across spot and perpetual markets.
+一個為 HyperLiquid 交易所設計的 delta-neutral（中性對沖）交易機器人，用於在現貨和永續市場創建和管理 delta-neutral 部位。
 
-![Delta Bot in Action](./assets/terminal-screenshot.png)
-*Delta Bot taking a position on HyperLiquid Exchange*
+![Delta Bot 運作中](./assets/terminal-screenshot.png)
+*Delta Bot 正在 HyperLiquid 交易所建立倉位*
 
-## Features
+## 功能
 
-- Implements delta-neutral trading strategies across spot and perpetual markets
-- Automatically identifies the best funding rates for optimal yield
-- Monitors and rebalances positions to maintain delta neutrality
-- RESTful API for remote control and monitoring
-- Handles order tracking and management
-- Periodic checks to find better opportunities based on funding rates
-- Graceful shutdown with position closing
-- Comprehensive logging
+- 在現貨和永續市場實施 delta-neutral 交易策略
+- 自動識別最佳資金費率以獲得最佳收益
+- 監控和重新平衡倉位以維持 delta-neutral
+- 用於遠程控制和監控的 RESTful API
+- 處理訂單跟踪和管理
+- 定期檢查以根據資金費率尋找更好的機會
+- 帶有平倉功能的正常關機
+- 全面的日誌記錄
 
-## Configuration
+## 設定
 
-The bot uses a combination of configuration files and environment variables:
+該機器人結合使用配置文件和環境變數：
 
-### 1. **Configuration File** (config.json) - Primary Configuration
+### 1. **配置文件** (config.json) - 主要設定
 
-The preferred way to configure the bot is through the `config.json` file, which controls most of the bot's behavior:
+設定機器人的首選方法是通過 `config.json` 文件，它控制著機器人的大部分行為：
 
 ```json
 {
@@ -47,41 +47,41 @@ The preferred way to configure the bot is through the `config.json` file, which 
 }
 ```
 
-Configuration sections:
-- **General settings:**
-  - `debug`: Enable detailed debug logging
-  - `tracked_coins`: List of coins to track and trade
-  - `autostart`: Whether to start trading automatically
-- **Allocation settings:**
-  - `spot_pct`: Percentage of capital to allocate to spot positions (e.g., 70%)
-  - `perp_pct`: Percentage of capital to allocate to perpetual positions (e.g., 30%)
-  - `rebalance_threshold`: Threshold for rebalancing positions (e.g., 0.05 = 5%)
-- **Trading settings:**
-  - `refresh_interval_sec`: Interval for refreshing positions in seconds
-- **API settings:**
-  - `host`: Host for the API server
-  - `port`: Port for the API server
-  - `enabled`: Whether the API server is enabled
+設定部分：
+- **一般設定:**
+  - `debug`: 啟用詳細的調試日誌
+  - `tracked_coins`: 要跟踪和交易的代幣列表
+  - `autostart`: 是否自動開始交易
+- **分配設定:**
+  - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）
+  - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）
+  - `rebalance_threshold`: 重新平衡倉位的閾值（例如 0.05 = 5%）
+- **交易設定:**
+  - `refresh_interval_sec`: 以秒為單位的倉位刷新間隔
+- **API 設定:**
+  - `host`: API 伺服器的主機
+  - `port`: API 伺服器的端口
+  - `enabled`: 是否啟用 API 伺服器
 
-### 2. **Environment Variables** - Required for Authentication
+### 2. **環境變數** - 身份驗證所需
 
-These environment variables are used for authentication with HyperLiquid and must be set:
+這些環境變數用於與 HyperLiquid 進行身份驗證，必須設定：
 
-- `HYPERLIQUID_PRIVATE_KEY`: Your private key for trading on HyperLiquid
-- `HYPERLIQUID_ADDRESS`: Your Ethereum address for HyperLiquid
+- `HYPERLIQUID_PRIVATE_KEY`: 您在 HyperLiquid 上交易的私鑰
+- `HYPERLIQUID_ADDRESS`: 您在 HyperLiquid 上的以太坊地址
 
-Example using environment variables:
+使用環境變數的範例：
 ```bash
-export HYPERLIQUID_PRIVATE_KEY={PRIVATE_KEY}
-export HYPERLIQUID_ADDRESS={SUB_ACCOUNT_TRADING_ADDRESS}
+export HYPERLIQUID_PRIVATE_KEY={您的私鑰}
+export HYPERLIQUID_ADDRESS={您的子帳戶交易地址}
 ```
 
-## Quick Start
+## 快速入門
 
-1. Clone the repository
-2. Set up environment variables for authentication
-3. Customize `config.json` to match your desired trading parameters
-4. Run the example script to test your configuration:
+1. 複製儲存庫
+2. 設定用於身份驗證的環境變數
+3. 自定義 `config.json` 以符合您期望的交易參數
+4. 運行範例腳本以測試您的設定：
 ```bash
 python example.py
 ```
@@ -101,60 +101,60 @@ python example.py
 
 **注意 2**：當您設定 "autostart": false 時，後端服務會正常啟動，API伺服器也會運行，但交易機器人本身的核心邏輯會處於「待命」狀態。
 
-日誌中的 Call start() manually to begin. 這句話的意思是「請手動呼叫 start()函數來開始運作」。這裡的「呼叫」並不是指在終端機輸入一個新的指令，而是指透過 API 來向正在運行的後端程式下達「開始」的指令。
-   1. 啟動後端服務 (python entrypoint.py)。
-   2. 啟動前端服務 (cd frontend && npm start)。
-   3. 在瀏覽器中打開 http://localhost:3000。
+日誌中的 `Call start() manually to begin.` 這句話的意思是「請手動呼叫 start() 函數來開始運作」。這裡的「呼叫」並不是指在終端機輸入一個新的指令，而是指透過 API 來向正在運行的後端程式下達「開始」的指令。
+   1. 啟動後端服務 (`python entrypoint.py`)。
+   2. 啟動前端服務 (`cd frontend && npm start`)。
+   3. 在瀏覽器中打開 `http://localhost:3000`。
    4. 在儀表板右上角的「Account Overview」區塊，您會看到一個綠色的 "Start" 按鈕。
    5. 點擊這個 "Start" 按鈕。
 
-點擊按鈕後，前端會發送一個 POST 請求到後端的 /api/bot/start 端點，後端收到請求後就會呼叫 start() 函數，您的機器人便會開始執行交易邏輯。
+點擊按鈕後，前端會發送一個 POST 請求到後端的 `/api/bot/start` 端點，後端收到請求後就會呼叫 `start()` 函數，您的機器人便會開始執行交易邏輯。
 
-5. Start the bot:
+5. 啟動機器人：
 ```bash
 python Delta.py
 ```
 
-## Building
+## 建置
 
-Build the Docker image with:
+使用以下指令建置 Docker 映像檔：
 
 ```bash
 ./build.sh
 ```
 
-This will create two images:
-- `hypervault-tradingbot:delta` (latest version)
-- `hypervault-tradingbot:delta-1.0.0` (versioned tag)
+這將創建兩個映像檔：
+- `hypervault-tradingbot:delta` (最新版本)
+- `hypervault-tradingbot:delta-1.0.0` (版本標籤)
 
-## API Endpoints
+## API 端點
 
-The bot provides a RESTful API for remote control and monitoring:
+該機器人提供一個 RESTful API 用於遠程控制和監控：
 
-### Bot Control
-- `GET /api/bot/state`: Get the current state of the bot
-- `POST /api/bot/start`: Start the bot's trading operations
-- `POST /api/bot/stop`: Stop the bot's trading operations
-- `POST /api/bot/close-position/{coin}`: Close a specific position
-- `POST /api/bot/create-position/{coin}`: Create a position for a specific coin
+### 機器人控制
+- `GET /api/bot/state`: 獲取機器人當前狀態
+- `POST /api/bot/start`: 啟動機器人的交易操作
+- `POST /api/bot/stop`: 停止機器人的交易操作
+- `POST /api/bot/close-position/{coin}`: 關閉特定倉位
+- `POST /api/bot/create-position/{coin}`: 為特定代幣創建倉位
 
-### Status and Monitoring
-- `GET /api/status`: Get the current status of the bot and its positions
-- `GET /api/status/funding-rates`: Get the current funding rates for all tracked coins
-- `GET /api/status/positions`: Get all current positions
+### 狀態與監控
+- `GET /api/status`: 獲取機器人及其倉位的當前狀態
+- `GET /api/status/funding-rates`: 獲取所有追蹤代幣的當前資金費率
+- `GET /api/status/positions`: 獲取所有當前倉位
 
-### Configuration
-- `GET /api/config`: Get the current configuration of the bot
-- `POST /api/config/update`: Update the bot's configuration
-- `GET /api/config/tracked-coins`: Get the list of tracked coins
-- `POST /api/config/add-coin/{coin}`: Add a coin to the tracked coins list
-- `POST /api/config/remove-coin/{coin}`: Remove a coin from the tracked coins list
+### 設定
+- `GET /api/config`: 獲取機器人當前設定
+- `POST /api/config/update`: 更新機器人設定
+- `GET /api/config/tracked-coins`: 獲取追蹤的代幣列表
+- `POST /api/config/add-coin/{coin}`: 將代幣添加到追蹤列表
+- `POST /api/config/remove-coin/{coin}`: 從追蹤列表中移除代幣
 
-## Usage
+## 使用方式
 
-1. Create a `.env` file from `.env.example` with your credentials
-2. Adjust `config.json` to match your desired trading parameters
-3. Build and run the Docker container:
+1. 從 `.env.example` 創建一個 `.env` 文件，並填入您的憑證
+2. 調整 `config.json` 以符合您期望的交易參數
+3. 建置並運行 Docker 容器：
 
 ```bash
 docker run -d \
@@ -166,70 +166,58 @@ docker run -d \
 
 ## 本專案配備前端UI讓使用者更方便地追蹤bot運作
 
-- 首先開啟新的terminal執行 `python entrypoint.py` 來啟動後端 (必須在 localhost:8080 上運行)
-- 接著再開啟另外一個terminal，導航到 frontend 目錄，然後執行 `npm start` (網址通常是 http://localhost:3000)。
+- 首先開啟新的terminal執行 `python entrypoint.py` 來啟動後端 (必須在 `localhost:8080` 上運行)
+- 接著再開啟另外一個terminal，導航到 `frontend` 目錄，然後執行 `npm start` (網址通常是 `http://localhost:3000`)。
 
-## The HyperVault Trading Ecosystem (Coming Soon!)
+## HyperVault 交易生態系統 (即將推出！)
 
-The Delta bot is part of the comprehensive HyperVault trading ecosystem. Our full platform will allow you to:
+Delta 機器人是 HyperVault 綜合交易生態系統的一部分。我們的完整平台將讓您能夠：
 
-- Deploy multiple bots with a single click
-- Leverage our Machine Learning engine to automatically optimize your trading configurations
-- Access specialized bots including this Delta-Neutral bot and our Market Making bots
-- Monitor your performance through our advanced dashboard featuring:
-  - Real-time position management
-  - Earnings visualization and analytics
-  - Latest position tracking and performance metrics
+- 一鍵部署多個機器人
+- 利用我們的機器學習引擎自動優化您的交易設定
+- 使用包括此 Delta-Neutral 機器人和我們的造市機器人在內的專業機器人
+- 透過我們的高級儀表板監控您的表現，其功能包括：
+  - 即時倉位管理
+  - 收益可視化與分析
+  - 最新倉位跟踪和績效指標
 
-HyperVault is designed for both new traders seeking simplified automation and experienced traders demanding powerful customization.
+HyperVault 專為尋求簡化自動化交易的新手和需要強大客製化功能的老手而設計。
 
-## Delta-Neutral Strategy
+## Delta-Neutral 策略
 
-The Delta bot implements a capital-efficient strategy:
-- Long spot positions to earn the funding rate
-- Short perpetual futures positions to hedge price risk
-- Automatically switches to better opportunities when funding rates change
+Delta 機器人實施一種資本高效的策略：
+- 做多現貨倉位以賺取資金費率
+- 做空永續期貨倉位以對沖價格風險
+- 當資金費率變化時自動切換到更好的機會
 
-The system targets a 70/30 spot-to-perp allocation ratio for optimal capital efficiency.
+該系統的目標是 70/30 的現貨與永續合約分配比例，以實現最佳的資本效率。
 
-## Versioning
+## 版本控制
 
-### Current Version: 1.0.0
+### 目前版本: 1.1.0
 
-**Release Notes:**
-- Initial release with core delta-neutral functionality
-- Full integration with HyperVault Trading Bots platform
-- API-based control and monitoring
-- Automatic detection of best funding opportunities
+**發行說明:**
+- 初始版本，具有核心的 delta-neutral 功能
+- 與 HyperVault 交易機器人平台完全整合
+- 基於 API 的控制和監控
+- 自動檢測最佳資金機會
 
-## Star History
+## Star 歷史
 
 [![Star History Chart](https://api.star-history.com/svg?repos=cgaspart/HL-Delta&type=Date)](https://www.star-history.com/#cgaspart/HL-Delta&Date)
 
-## License
+## 授權
 
-MIT License
+MIT 授權
 
 Copyright (c) 2024
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+特此免費授予任何人獲取本軟體及相關文檔文件（“軟體”）副本的權利，可以不受限制地處理本軟體，包括但不限於使用、複製、修改、合併、發布、分發、再授權和/或銷售本軟體的副本，並允許獲得本軟體的人員這樣做，但須符合以下條件：
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+上述版權聲明和本許可聲明應包含在本軟體的所有副本或主要部分中。
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+本軟體“按原樣”提供，不提供任何明示或暗示的擔保，包括但不限於對適銷性、特定用途適用性和非侵權性的擔保。在任何情況下，作者或版權持有人均不對任何索賠、損害或其他責任承擔任何責任，無論是在合同訴訟、侵權行為或其他方面，由本軟體或與本軟體的使用或其他交易引起或與之相關。
 
-## Disclaimer
+## 免責聲明
 
-This software is for educational purposes only. Use at your own risk. Trading cryptocurrencies involves significant risk of loss and is not suitable for all investors. 
+本軟體僅供教育目的使用。使用風險自負。交易加密貨幣涉及重大的虧損風險，不適合所有投資者。

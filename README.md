@@ -194,7 +194,7 @@ The system targets a 70/30 spot-to-perp allocation ratio for optimal capital eff
 
 ## Versioning
 
-### Current Version: 1.0.0
+### Current Version: 1.1.0
 
 **Release Notes:**
 - Initial release with core delta-neutral functionality

@@ -102,7 +102,7 @@ class Delta:
             self.address = self._get_required_env("HYPERLIQUID_ADDRESS")
             
             self.account: LocalAccount = eth_account.Account.from_key(private_key)
-            self.exchange = Exchange(self.account, constants.MAINNET_API_URL, vault_address=self.address)
+            self.exchange = Exchange(self.account, constants.MAINNET_API_URL)
             self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
             self.api_url = constants.MAINNET_API_URL
             
@@ -216,12 +216,19 @@ class Delta:
                             "entry_ntl": float(balance["entryNtl"])
                         }
             
+            # 重新計算總帳戶價值，以包含現貨資產
+            spot_value = self._get_total_spot_account_value()
+            perp_value = self.perp_user_state
+            
+            # 更新主要的帳戶價值屬性，以反映合併後的總額
+            self.account_value = spot_value + perp_value
+            self.total_raw_usd = self.account_value # 保持一致性
+            
             logger.info(f"已使用帳戶初始化: {self.address[:8]}...")
-            logger.info(f"總帳戶價值: ${self.account_value}")
+            logger.info(f"總帳戶價值 (現貨 + 合約): ${self.account_value:.2f}")
         except Exception as e:
             logger.error(f"初始化客戶端失敗: {e}")
             raise RuntimeError("客戶端初始化失敗") from e
-
     def _get_required_env(self, env_name):
         """Get a required environment variable or raise an informative error."""
         value = os.getenv(env_name)
@@ -246,6 +253,21 @@ class Delta:
             logger.error(f"載入設定時發生未預期的錯誤: {e}")
             raise
         
+    def _get_total_usdc_balance(self):
+        """Get the total USDC balance across both spot and perp accounts."""
+        spot_usdc = self._get_spot_account_USDC()
+        
+        # Get perp account USDC balance (margin)
+        perp_usdc = 0
+        for asset in self.user_state.get("crossAssetPositions", []):
+            if asset.get("position", {}).get("coin") == "USDC":
+                perp_usdc = float(asset.get("position", {}).get("szi", 0))
+                break
+        
+        total_usdc = spot_usdc + perp_usdc
+        logger.debug(f"總 USDC 餘額: {total_usdc} (現貨: {spot_usdc}, 永續: {perp_usdc})")
+        return total_usdc
+
     def _get_spot_account_USDC(self):
         spot_user_state = self.info.spot_user_state(self.address)
         for balance in spot_user_state["balances"]:
@@ -286,31 +308,50 @@ class Delta:
         return round(price / tick_size) * tick_size
     
     def _calculate_optimal_spot_size(self, coin_name):
-        spot_price = self._get_spot_price(coin_name)
-        USDC_balance = self._get_spot_account_USDC()
+        # Get the latest L1 price for accurate calculation
+        try:
+            l2_book = self.info.l2_snapshot(coin_name)
+            if not l2_book or not l2_book["levels"][0]:
+                logger.warning(f"無法取得 {coin_name} 的 L2 訂單簿來計算最佳規模，將使用中間價。")
+                price = self._get_spot_price(coin_name)
+            else:
+                price = float(l2_book["levels"][0][0]['px']) # Use best bid for a more conservative size calculation
+        except Exception as e:
+            logger.error(f"計算最佳規模時獲取價格出錯: {e}，將使用中間價。")
+            price = self._get_spot_price(coin_name)
+
+        if price <= 0:
+            logger.error(f"無法為 {coin_name} 取得有效價格以計算規模。")
+            return 0
+
+        # Use the total available USDC across all accounts as the basis for our position size
+        total_usdc_balance = self._get_total_usdc_balance()
         
-        # Use only up to 90% of available USDC to account for fees and price fluctuations
-        available_usdc = USDC_balance * 0.9
+        # We aim to use a significant portion of our total capital for the delta-neutral position.
+        # Let's use 95% of our total USDC to open the position, which will be split between spot buy and perp margin.
+        # The spot leg will consume the majority of this capital.
+        capital_for_position = total_usdc_balance * 0.95
         
-        # Ensure we have sufficient USDC (at least $10 worth)
-        if available_usdc < 10:
-            logger.warning(f"USDC 餘額不足，無法購買現貨: ${available_usdc:.2f}")
+        if capital_for_position < 10:
+            logger.warning(f"總可用於部位的資金不足: ${capital_for_position:.2f}")
             return 0
         
-        # Calculate size based on available USDC and current price
-        size = available_usdc / spot_price
+        # The size of the spot leg determines the size of the perp leg.
+        # The USDC required for the spot leg is size * price.
+        # Let's allocate the configured percentage of our capital to the spot purchase.
+        # This is a conceptual allocation to determine size, the actual USDC will come from the total balance.
         
-        # Set minimum size threshold (e.g. $10 worth)
-        min_size_value = 10 / spot_price
+        size = capital_for_position / price
         
-        if size < min_size_value:
-            logger.warning(f"計算出的現貨規模太小: {size} (最小: {min_size_value})")
+        min_size_value_in_asset = 10 / price
+        
+        if size < min_size_value_in_asset:
+            logger.warning(f"計算出的現貨規模太小: {size} (最小: {min_size_value_in_asset})")
             return 0
             
         rounded_size = self.round_size(coin_name, True, size)
         
-        # Log the calculation for debugging
-        logger.info(f"計算 {coin_name} 的最佳現貨規模: {size} -> 四捨五入至 {rounded_size} (USDC: ${available_usdc:.2f}, 價格: ${spot_price:.2f})")
+        logger.info(f"計算 {coin_name} 的最佳現貨規模: {size:.6f} -> 四捨五入至 {rounded_size} (基於總 USDC 餘額 ${total_usdc_balance:.2f})")
         
         return rounded_size
     
@@ -345,7 +386,10 @@ class Delta:
     def spot_perp_repartition(self):
         spot_value = self._get_total_spot_account_value()
         perp_value = self.perp_user_state
-        return spot_value / (spot_value + perp_value)
+        total_value = spot_value + perp_value
+        if total_value == 0:
+            return 0.0
+        return spot_value / total_value
     
     def has_delta_neutral_position(self, coin_name, error_margin=0.05):
         if coin_name not in self.coins:
@@ -394,52 +438,59 @@ class Delta:
         return best_coin
     
     def _extract_and_track_order_ids(self, pending_order, spot_order_result, perp_order_result, coin_name, operation_type=""):
-        """Helper method to extract order IDs from order responses and track their status.
-        
-        Args:
-            pending_order: The PendingDeltaOrder object to update
-            spot_order_result: The result from the spot order API call
-            perp_order_result: The result from the perp order API call
-            coin_name: Name of the coin
-            operation_type: Type of operation (opening/closing) for logging
-        
-        Returns:
-            bool: True if tracking started or orders filled, False otherwise
-        """
-        # Extract order IDs from spot order response
+        """從訂單回應中提取訂單 ID 並追蹤其狀態。"""
+        spot_success = False
+        perp_success = False
+
+        # 處理現貨訂單回應
         if spot_order_result and spot_order_result.get('status') == 'ok':
-            spot_response = spot_order_result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
-            if 'filled' in spot_response:
+            response_data = spot_order_result.get('response', {}).get('data', {})
+            status = response_data.get('statuses', [{}])[0]
+            if 'resting' in status:
+                pending_order.spot_oid = int(status['resting']['oid'])
+                logger.info(f"已成功提交 {coin_name} 的現貨 {operation_type} 訂單，訂單 ID: {pending_order.spot_oid}")
+                spot_success = True
+            elif 'filled' in status:
+                pending_order.spot_oid = int(status['filled']['oid'])
                 pending_order.spot_filled = True
-                pending_order.spot_oid = int(spot_response['filled']['oid'])
-                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單立即成交，訂單 ID: {pending_order.spot_oid}")
-            elif 'resting' in spot_response:
-                pending_order.spot_oid = int(spot_response['resting']['oid'])
-                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單已掛單，訂單 ID: {pending_order.spot_oid}")
-        
-        # Extract order IDs from perp order response
+                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單已立即成交，訂單 ID: {pending_order.spot_oid}")
+                spot_success = True
+            elif 'error' in status:
+                logger.warning(f"提交 {coin_name} 的現貨 {operation_type} 訂單失敗: {status['error']}")
+            else:
+                logger.warning(f"提交 {coin_name} 的現貨 {operation_type} 訂單時收到未知的回應: {spot_order_result}")
+
+        # 處理永續合約訂單回應
         if perp_order_result and perp_order_result.get('status') == 'ok':
-            perp_response = perp_order_result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
-            if 'filled' in perp_response:
+            response_data = perp_order_result.get('response', {}).get('data', {})
+            status = response_data.get('statuses', [{}])[0]
+            if 'resting' in status:
+                pending_order.perp_oid = int(status['resting']['oid'])
+                logger.info(f"已成功提交 {coin_name} 的永續合約 {operation_type} 訂單，訂單 ID: {pending_order.perp_oid}")
+                perp_success = True
+            elif 'filled' in status:
+                pending_order.perp_oid = int(status['filled']['oid'])
                 pending_order.perp_filled = True
-                pending_order.perp_oid = int(perp_response['filled']['oid'])
-                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單立即成交，訂單 ID: {pending_order.perp_oid}")
-            elif 'resting' in perp_response:
-                pending_order.perp_oid = int(perp_response['resting']['oid'])
-                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單已掛單，訂單 ID: {pending_order.perp_oid}")
+                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單已立即成交，訂單 ID: {pending_order.perp_oid}")
+                perp_success = True
+            elif 'error' in status:
+                logger.warning(f"提交 {coin_name} 的永續合約 {operation_type} 訂單失敗: {status['error']}")
+            else:
+                logger.warning(f"提交 {coin_name} 的永續合約 {operation_type} 訂單時收到未知的回應: {perp_order_result}")
+
+        # 決定是否需要追蹤這些訂單
+        if pending_order.spot_oid or pending_order.perp_oid:
+            if not pending_order.spot_filled or not pending_order.perp_filled:
+                self.pending_orders.append(pending_order)
+                logger.info(f"已將 {coin_name} 的待處理 {operation_type} 部位加入追蹤列表。")
+            return True
         
-        # Determine if we need to track these orders or if they're already complete
-        if (pending_order.spot_oid or pending_order.perp_oid) and (not pending_order.spot_filled or not pending_order.perp_filled):
-            self.pending_orders.append(pending_order)
-            logger.info(f"已將 {coin_name} 的待處理 {operation_type} 部位加入追蹤")
-            return True
-        elif pending_order.spot_filled and pending_order.perp_filled:
-            # If both orders filled immediately, we don't need to track
-            logger.info(f"{coin_name} 的兩筆 {operation_type} 訂單皆立即成交")
-            return True
-        else:
-            logger.warning(f"無法建立或追蹤 {coin_name} 的 {operation_type} 訂單")
+        # 如果兩邊都提交失敗，則返回 False
+        if not spot_success and not perp_success:
+            logger.error(f"為 {coin_name} 建立 {operation_type} 部位的兩邊訂單均提交失敗。")
             return False
+            
+        return True
     
     async def create_delta_position(self, coin_name):
         if coin_name not in self.coins:
@@ -526,11 +577,9 @@ class Delta:
             spot_pair = f"{spot_name}/USDC"
             
             spot_order_result = self.exchange.order(spot_pair, True, spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
-            logger.info(f"現貨訂單結果: {spot_order_result}")
             
             logger.info(f"正在建立 {coin_name} 的永續合約限價空單: {perp_size} @ {perp_limit_price} (僅掛單)")
             perp_order_result = self.exchange.order(coin_name, False, perp_size, perp_limit_price, {"limit": {"tif": "Alo"}})
-            logger.info(f"永續合約訂單結果: {perp_order_result}")
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -772,7 +821,6 @@ class Delta:
                 
                 # For sell orders, side is False (sell)
                 spot_order_result = self.exchange.order(spot_pair, False, rounded_spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
-                logger.info(f"現貨賣單結果: {spot_order_result}")
             
             # For perp, we need to buy back our short position
             if perp_size < 0:
@@ -782,7 +830,6 @@ class Delta:
                 
                 # For buy orders, side is True (buy)
                 perp_order_result = self.exchange.order(coin_name, True, buy_size, perp_limit_price, {"limit": {"tif": "Alo"}})
-                logger.info(f"永續合約買單結果: {perp_order_result}")
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -1273,56 +1320,8 @@ class Delta:
         if allocation_ok == False:
             logger.info(f"{Colors.RED}投資組合分配未在目標比例內 (70% 現貨 / 30% 永續合約){Colors.RESET}")
         
-        # Check if we should create a new delta-neutral position
-        best_coin = self.get_best_yearly_funding_rate()
-        if best_coin:
-            rate = self.coins[best_coin].perp.yearly_funding_rate
-            rate_color = Colors.RED
-            if rate >= 20:
-                rate_color = Colors.GREEN + Colors.BOLD
-            elif rate >= 10:
-                rate_color = Colors.GREEN
-            elif rate >= 5:
-                rate_color = Colors.YELLOW
-                
-            logger.info(f"{Colors.YELLOW}新部位的最佳資金費率幣種: {Colors.YELLOW}{best_coin}，費率為 {rate_color}{rate:.4f}%{Colors.RESET}")
-            
-            # First check if we have any existing delta-neutral positions we need to close
-            existing_positions_found = False
-            for coin_name in self.tracked_coins:
-                if coin_name == "USDC" or coin_name == best_coin:
-                    continue
-                    
-                is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
-                if is_delta_neutral:
-                    existing_positions_found = True
-                    logger.info(f"{Colors.YELLOW}在 {Colors.BLUE}{coin_name}{Colors.YELLOW} 上發現現有的 Delta 中性部位，將在建立新部位前關閉{Colors.RESET}")
-                    close_result = self.close_delta_position(coin_name)
-                    if close_result:
-                        logger.info(f"{Colors.GREEN}已成功啟動關閉 {Colors.BLUE}{coin_name}{Colors.GREEN} 上現有部位的程序{Colors.RESET}")
-                    else:
-                        logger.warning(f"{Colors.RED}關閉 {Colors.BLUE}{coin_name}{Colors.RED} 上的現有部位失敗{Colors.RESET}")
-                        logger.warning(f"{Colors.RED}在現有部位被關閉前，將跳過建立新部位{Colors.RESET}")
-                        break
-            
-            # Check if best coin already has a position
-            is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(best_coin)
-            
-            # Only proceed if we don't have existing positions or if best coin already has a position
-            if (not existing_positions_found or is_delta_neutral) and rate >= 5.0:
-                if not is_delta_neutral:
-                    logger.info(f"{Colors.GREEN}正在為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位...{Colors.RESET}")
-                    result = await self.execute_best_delta_strategy()
-                    if result:
-                        logger.info(f"{Colors.GREEN}成功為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位{Colors.RESET}")
-                    else:
-                        logger.warning(f"{Colors.RED}為 {Colors.YELLOW}{best_coin}{Colors.RED} 建立 Delta 中性部位失敗{Colors.RESET}")
-                else:
-                    logger.info(f"{Colors.GREEN}已持有 {Colors.YELLOW}{best_coin}{Colors.GREEN} 的 Delta 中性部位{Colors.RESET}")
-            elif is_delta_neutral:
-                logger.info(f"{Colors.GREEN}已持有 {Colors.YELLOW}{best_coin}{Colors.GREEN} 的 Delta 中性部位{Colors.RESET}")
-            else:
-                logger.info(f"{Colors.YELLOW}最佳資金費率 ({rate:.4f}%) 低於 5% 的門檻，不建立部位{Colors.RESET}")
+        # Initial check for new position opportunities
+        await self._check_for_new_position_opportunities()
 
         # Main loop
         while self._is_running:
@@ -1332,6 +1331,9 @@ class Delta:
                 
                 # Check for and execute rebalancing if needed
                 await self.check_and_rebalance_positions()
+
+                # Check for new position opportunities if we don't have one
+                await self._check_for_new_position_opportunities()
 
                 # Check hourly funding rates (runs only at HH:50)
                 await self.check_hourly_funding_rates()
@@ -1347,6 +1349,37 @@ class Delta:
                 logger.error(f"{Colors.RED}主迴圈發生錯誤: {e}{Colors.RESET}", exc_info=True)
                 await asyncio.sleep(60)  # Sleep longer on error
 
+    async def _check_for_new_position_opportunities(self):
+        """Checks if there's a good opportunity to open a new delta-neutral position."""
+        # First, check if we already have any active position. If so, do nothing.
+        for coin in self.coins:
+            if self.has_delta_neutral_position(coin)[0]:
+                logger.debug(f"已持有 {coin} 的部位，跳過尋找新機會。")
+                return
+
+        # If no active positions, find the best coin to open one.
+        best_coin = self.get_best_yearly_funding_rate()
+        if best_coin:
+            rate = self.coins[best_coin].perp.yearly_funding_rate
+            rate_color = Colors.RED
+            if rate >= 20:
+                rate_color = Colors.GREEN + Colors.BOLD
+            elif rate >= 10:
+                rate_color = Colors.GREEN
+            elif rate >= 5:
+                rate_color = Colors.YELLOW
+                
+            logger.info(f"{Colors.YELLOW}新部位的最佳資金費率幣種: {Colors.YELLOW}{best_coin}，費率為 {rate_color}{rate:.4f}%{Colors.RESET}")
+            
+            if rate >= 5.0:
+                logger.info(f"{Colors.GREEN}正在為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位...{Colors.RESET}")
+                result = await self.execute_best_delta_strategy()
+                if result:
+                    logger.info(f"{Colors.GREEN}成功為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立 Delta 中性部位{Colors.RESET}")
+                else:
+                    logger.warning(f"{Colors.RED}為 {Colors.YELLOW}{best_coin}{Colors.RED} 建立 Delta 中性部位失敗{Colors.RESET}")
+            else:
+                logger.info(f"{Colors.YELLOW}最佳資金費率 ({rate:.4f}%) 低於 5% 的門檻，不建立部位{Colors.RESET}")
 
 def setup_signal_handlers(delta_instance):
     """Set up signal handlers for graceful shutdown."""

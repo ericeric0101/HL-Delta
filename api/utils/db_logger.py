@@ -67,15 +67,51 @@ class SupabaseLogger:
             logger.debug(f"Supabase client not initialized. Skipping account snapshot log.")
             return
 
+        payload = {k: v for k, v in snapshot_data.items() if v is not None}
+        if "account_value" not in payload:
+            # Nothing meaningful to store if總值都沒有，直接略過
+            logger.warning(
+                f"Skipping account snapshot log because 'account_value' is missing. Payload: {snapshot_data}"
+            )
+            return
+
         try:
             # The table name is assumed to be 'account_snapshots'
-            data, count = self.client.table('account_snapshots').insert(snapshot_data).execute()
+            data, count = self.client.table('account_snapshots').insert(payload).execute()
             if data and len(data) > 1 and data[1]:
                 logger.info(f"Successfully logged account snapshot to Supabase at {snapshot_data.get('timestamp')}")
             else:
                 logger.error(f"Failed to log account snapshot to Supabase. Response: {data}")
         except Exception as e:
-            logger.error(f"An exception occurred while logging account snapshot to Supabase: {e}")
+            message = str(e)
+            if "Could not find the" in message and "column" in message:
+                # Supabase schema缺少某些欄位，移除後重試一次
+                logger.warning(f"Account snapshot columns mismatch ({message}). Retrying with reduced payload.")
+                reduced_payload = \
+                    {key: value for key, value in payload.items() if key not in message and key != 'perp_account_value'}
+                if "account_value" not in reduced_payload:
+                    logger.warning(
+                        f"Reduced payload after removing unsupported columns lacks 'account_value'. Skipping insert. Payload: {snapshot_data}"
+                    )
+                    return
+                try:
+                    if reduced_payload:
+                        data, count = self.client.table('account_snapshots').insert(reduced_payload).execute()
+                        if data and len(data) > 1 and data[1]:
+                            logger.info(
+                                f"Logged account snapshot with reduced payload at {snapshot_data.get('timestamp')}"
+                            )
+                        else:
+                            logger.error(f"Failed to log reduced account snapshot to Supabase. Response: {data}")
+                    else:
+                        logger.error("Reduced account snapshot payload is empty, skipping insert.")
+                except Exception as inner:
+                    logger.error(
+                        f"Retrying account snapshot insert failed: {inner}. Original payload: {snapshot_data}",
+                        exc_info=True,
+                    )
+            else:
+                logger.error(f"An exception occurred while logging account snapshot to Supabase: {e}")
 
 # Create a singleton instance to be used across the application
 db_logger = SupabaseLogger()

@@ -1,7 +1,7 @@
 {
   "general": {
     "debug": false,
-    "tracked_coins": ["HYPE", "SOL", "ETH", "BTC", "USDC"],
+    "tracked_coins": ["HYPE", "XPL", "SOL", "ETH", "BTC"],
     "autostart": false
   },
   "allocation": {
@@ -13,7 +13,10 @@
   "trading": {
     "refresh_interval_sec": 60,
     "min_spot_balance_to_open": 1,
-    "target_perp_leverage": 2.0
+    "target_perp_leverage": 2.0,
+    "funding_check_minute": 50,
+    "funding_open_threshold_pct": 10.0,
+    "funding_replace_threshold_pct": 20.0
   },
   "api": {
     "host": "0.0.0.0",

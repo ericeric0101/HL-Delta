@@ -143,12 +143,11 @@ class Delta:
             self.coins[coin_name] = CoinInfo(name=coin_name)
             spot_market_found = False
             for spot_coin in spot_coins:
-                if (coin_name == "BTC" and spot_coin["name"] == "UBTC") or \
-                   (coin_name == "ETH" and spot_coin["name"] == "UETH") or \
-                   (coin_name == "SOL" and spot_coin["name"] == "USOL") or \
-                   (coin_name == spot_coin["name"]):
+                spot_name = spot_coin["name"]
+                normalized_name = spot_name.lstrip('U') if spot_name.startswith('U') else spot_name
+                if coin_name == spot_name or coin_name == normalized_name:
                     self.coins[coin_name].spot = SpotMarket(
-                        name=spot_coin["name"],
+                        name=spot_name,
                         token_id=spot_coin["tokenId"],
                         index=spot_coin["index"],
                         sz_decimals=spot_coin["szDecimals"],
@@ -157,10 +156,14 @@ class Delta:
                         full_name=spot_coin["fullName"],
                         evm_contract=spot_coin.get("evmContract"),
                         deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
-                        tick_size=0.001 # Default, will be overwritten for major pairs
+                        tick_size=spot_coin.get("tickSize", 0.001)
                     )
-                    if coin_name == "BTC": self.coins[coin_name].spot.tick_size = 1
-                    elif coin_name == "ETH": self.coins[coin_name].spot.tick_size = 0.1
+                    if coin_name == "BTC":
+                        self.coins[coin_name].spot.tick_size = 1
+                    elif coin_name == "ETH":
+                        self.coins[coin_name].spot.tick_size = 0.1
+                    elif coin_name == "SOL":
+                        self.coins[coin_name].spot.tick_size = 0.001
                     spot_market_found = True
                     break
             
@@ -187,6 +190,11 @@ class Delta:
         self.refresh_interval_sec = trading_cfg.get("refresh_interval_sec", 60)
         self.min_spot_balance_to_open = float(trading_cfg.get("min_spot_balance_to_open", 50))
         self.target_perp_leverage = max(float(trading_cfg.get("target_perp_leverage", 1.0)), 0.1)
+        self.funding_check_minute = int(trading_cfg.get("funding_check_minute", 50))
+        self.funding_open_threshold_pct = float(trading_cfg.get("funding_open_threshold_pct", 5.0))
+        self.funding_replace_threshold_pct = float(
+            trading_cfg.get("funding_replace_threshold_pct", self.funding_open_threshold_pct)
+        )
         
         await self._update_positions()
         logger.info(f"已使用帳戶初始化: {self.address[:8]}...")
@@ -206,13 +214,41 @@ class Delta:
                 logger.error(f"訂單 {oid} 缺少 'coin' 欄位，無法記錄 Supabase 日誌。原始資料: {order_info}")
                 return
 
+            # Handle asset id strings like '@107' returned by Hyperliquid
+            if isinstance(coin, str) and coin.startswith('@'):
+                asset_id_str = coin.lstrip('@')
+                resolved_coin = None
+                asset_to_name = getattr(self.info, 'asset_to_name', None)
+                if asset_to_name:
+                    try:
+                        resolved_coin = asset_to_name.get(int(asset_id_str))
+                    except (ValueError, TypeError):
+                        resolved_coin = None
+                if not resolved_coin:
+                    # Fallback using inverse of name_to_asset if available
+                    name_to_asset = getattr(self.info, 'name_to_asset', None)
+                    if name_to_asset:
+                        inverse_map = {str(v).lstrip('@'): k for k, v in name_to_asset.items()}
+                        resolved_coin = inverse_map.get(asset_id_str)
+                if resolved_coin:
+                    coin = resolved_coin
+                else:
+                    logger.warning(f"無法將資產編號 {coin} 解析為幣種名稱，Supabase 將記錄原始值。")
+
             is_spot = order_info.get('isSpot', False)
             market = 'spot' if is_spot else 'perp'
 
             side_field = order_info.get('side')
             side = 'buy'
             if isinstance(side_field, str):
-                side = 'buy' if side_field.upper() in ('B', 'BUY') else 'sell'
+                side_code = side_field.upper()
+                if side_code in ('B', 'BUY'):
+                    side = 'buy'
+                elif side_code in ('S', 'SELL', 'A'):
+                    # Hyperliquid 回傳 'A' 代表 Ask (賣單)
+                    side = 'sell'
+                else:
+                    side = 'buy'
             elif isinstance(side_field, bool):
                 side = 'buy' if side_field else 'sell'
 
@@ -234,6 +270,10 @@ class Delta:
                 filled_size = float(filled_size) if filled_size is not None else 0.0
             except (TypeError, ValueError):
                 filled_size = 0.0
+
+            if filled_size <= 0:
+                logger.debug(f"訂單 {oid} 的成交數量為 0，跳過 Supabase 紀錄。原始資料: {order_info}")
+                return
 
             trade_data = {
                 'timestamp': timestamp_iso,
@@ -378,6 +418,37 @@ class Delta:
             if key == coin_name:
                 return float(value)
         return 0
+
+    def _get_filled_size_from_oid(self, oid: Optional[int]) -> Optional[float]:
+        if not oid:
+            return None
+        try:
+            order_status = self.info.query_order_by_oid(self.address, oid)
+            order_info = order_status.get('order') if isinstance(order_status, dict) else None
+            if not order_info:
+                return None
+
+            orig_sz = order_info.get('origSz')
+            remaining_sz = order_info.get('sz')
+            filled_sz = order_info.get('filledSz') or order_info.get('totalFilledSz')
+
+            def to_float(value):
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            orig_sz = to_float(orig_sz)
+            remaining_sz = to_float(remaining_sz)
+            filled_sz = to_float(filled_sz)
+
+            if orig_sz is not None and remaining_sz is not None:
+                return max(orig_sz - remaining_sz, 0.0)
+            if filled_sz is not None:
+                return max(filled_sz, 0.0)
+        except Exception as e:
+            logger.debug(f"查詢訂單 {oid} 的成交數量失敗: {e}")
+        return None
 
     def _get_emergency_price(self, coin_name: str, is_buy: bool, is_spot: bool) -> float:
         """Fetch a price that is likely to execute immediately for rollback purposes."""
@@ -578,19 +649,17 @@ class Delta:
         
         if perp_size == 0 or spot_size == 0:
             return False, perp_size, spot_size, 0
-        
+
         is_proper_direction = perp_size < 0 and spot_size > 0
-        
+
         abs_perp_size = abs(perp_size)
         size_diff = abs(abs_perp_size - spot_size)
         
         larger_size = max(abs_perp_size, spot_size)
         diff_percentage = (size_diff / larger_size) * 100 if larger_size > 0 else 0
         
-        is_within_margin = diff_percentage <= (error_margin * 100)
-        
-        is_delta_neutral = is_proper_direction and is_within_margin
-        
+        is_delta_neutral = is_proper_direction
+
         return is_delta_neutral, perp_size, spot_size, diff_percentage
 
     async def _update_positions(self):
@@ -755,17 +824,22 @@ class Delta:
             elif spot_info['state'] == 'filled':
                 logger.critical(f"現貨訂單 {spot_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
                 side_to_rollback = not (spot_info.get('side') == 'buy')
-                emergency_price = self._get_emergency_price(coin_name, side_to_rollback, True)
-                logger.info(
-                    f"緊急回滾現貨 {'買' if side_to_rollback else '賣'}單，價格設定為 {emergency_price:.4f} (IOC)"
-                )
-                self.exchange.order(
-                    spot_pair,
-                    side_to_rollback,
-                    spot_size,
-                    emergency_price,
-                    {"limit": {"tif": "Ioc"}},
-                )
+                filled_spot_sz = self._get_filled_size_from_oid(spot_info.get('oid'))
+                effective_spot_size = filled_spot_sz if filled_spot_sz is not None else spot_size
+                if effective_spot_size <= 0:
+                    logger.info("緊急回滾時現貨成交數量為 0，略過現貨回滾。")
+                else:
+                    emergency_price = self._get_emergency_price(coin_name, side_to_rollback, True)
+                    logger.info(
+                        f"緊急回滾現貨 {'買' if side_to_rollback else '賣'}單 {effective_spot_size:.8f}，價格 {emergency_price:.4f} (IOC)"
+                    )
+                    self.exchange.order(
+                        spot_pair,
+                        side_to_rollback,
+                        effective_spot_size,
+                        emergency_price,
+                        {"limit": {"tif": "Ioc"}},
+                    )
 
         if perp_info and perp_info["status"] == 'ok':
             if perp_info['state'] == 'resting':
@@ -774,17 +848,22 @@ class Delta:
             elif perp_info['state'] == 'filled':
                 logger.critical(f"合約訂單 {perp_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
                 side_to_rollback = not (perp_info.get('side') == 'buy')
-                emergency_price = self._get_emergency_price(coin_name, side_to_rollback, False)
-                logger.info(
-                    f"緊急回滾永續 {'買' if side_to_rollback else '賣'}單，價格設定為 {emergency_price:.4f} (IOC)"
-                )
-                self.exchange.order(
-                    coin_name,
-                    side_to_rollback,
-                    perp_size,
-                    emergency_price,
-                    {"limit": {"tif": "Ioc"}},
-                )
+                filled_perp_sz = self._get_filled_size_from_oid(perp_info.get('oid'))
+                effective_perp_size = filled_perp_sz if filled_perp_sz is not None else perp_size
+                if effective_perp_size <= 0:
+                    logger.info("緊急回滾時永續成交數量為 0，略過永續回滾。")
+                else:
+                    emergency_price = self._get_emergency_price(coin_name, side_to_rollback, False)
+                    logger.info(
+                        f"緊急回滾永續 {'買' if side_to_rollback else '賣'}單 {effective_perp_size:.8f}，價格 {emergency_price:.4f} (IOC)"
+                    )
+                    self.exchange.order(
+                        coin_name,
+                        side_to_rollback,
+                        effective_perp_size,
+                        emergency_price,
+                        {"limit": {"tif": "Ioc"}},
+                    )
 
     async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:
         """Attempts to place orders based on side (opening/closing) and type (maker/taker)."""
@@ -1038,12 +1117,11 @@ class Delta:
 
     def _get_spot_pair(self, coin_name: str) -> str:
         """Helper to get the correct spot pair name."""
-        if coin_name == "BTC":
-            spot_name = "UBTC"
-        elif coin_name == "ETH":
-            spot_name = "UETH"
-        else:
-            spot_name = coin_name
+        coin_info = self.coins.get(coin_name)
+        if coin_info and coin_info.spot:
+            return f"{coin_info.spot.name}/USDC"
+
+        spot_name = coin_name if coin_name.startswith('U') else f"U{coin_name}"
         return f"{spot_name}/USDC"
 
     async def _relist_unfilled_orders(self, pending_order: PendingDeltaOrder):
@@ -1367,10 +1445,16 @@ class Delta:
             now = time.localtime()
             
             # Only run this function at 10 minutes before the hour (e.g., 8:50, 9:50, etc.)
-            if now.tm_min != 50:
+            if now.tm_min != self.funding_check_minute:
                 return
                 
-            logger.info(f"\n{Colors.BOLD}正在執行每小時資金費率檢查 (整點前 10 分鐘){Colors.RESET}")
+            minutes_before = (60 - self.funding_check_minute) % 60
+            if minutes_before == 0:
+                timing_desc = "整點檢查"
+            else:
+                timing_desc = f"整點前 {minutes_before} 分鐘"
+
+            logger.info(f"\n{Colors.BOLD}正在執行每小時資金費率檢查 ({timing_desc}){Colors.RESET}")
             
             # Get current funding rates
             from test_market_data import check_funding_rates, calculate_yearly_funding_rates
@@ -1478,12 +1562,14 @@ class Delta:
                 logger.info(f"{Colors.YELLOW}未找到活躍的 Delta 中性部位。{Colors.RESET}")
                 # Find the best coin and create a new position if its rate is >= 5%
                 best_coin = self.get_best_yearly_funding_rate()
-                if best_coin and self.coins[best_coin].perp.yearly_funding_rate >= 5.0:
+                if best_coin and self.coins[best_coin].perp.yearly_funding_rate >= self.funding_open_threshold_pct:
                     logger.info(f"{Colors.GREEN}正在為 {Colors.YELLOW}{best_coin}{Colors.GREEN} 建立新的 Delta 中性部位，費率為 {Colors.GREEN}{self.coins[best_coin].perp.yearly_funding_rate:.4f}%{Colors.RESET}")
                     await self.create_delta_position(best_coin)
                 else:
-                    logger.info(f"{Colors.YELLOW}找不到資金費率 >= 5% 的幣種。等待下次檢查。{Colors.RESET}")
-                return
+                    logger.info(
+                        f"{Colors.YELLOW}找不到資金費率 >= {self.funding_open_threshold_pct:.2f}% 的幣種。等待下次檢查。{Colors.RESET}"
+                    )
+                    return
             
             # Check if current position has yield < 5%
             current_yield = self.coins[current_position_coin].perp.yearly_funding_rate
@@ -1497,14 +1583,21 @@ class Delta:
                 
             logger.info(f"當前 Delta 中性部位: {Colors.YELLOW}{current_position_coin}{Colors.RESET}，收益率: {rate_color}{current_yield:.4f}%{Colors.RESET}")
             
-            if current_yield is None or current_yield < 5.0:
-                logger.info(f"{Colors.YELLOW}{current_position_coin} 的當前收益率低於 5% (或為空)。正在尋找更好的選擇...{Colors.RESET}")
+            if current_yield is None or current_yield < self.funding_replace_threshold_pct:
+                logger.info(
+                    f"{Colors.YELLOW}{current_position_coin} 的當前收益率低於 {self.funding_replace_threshold_pct:.2f}% (或為空)。正在尋找更好的選擇...{Colors.RESET}"
+                )
                 
                 # Find coin with highest funding rate
                 best_coin = self.get_best_yearly_funding_rate()
                 
-                if not best_coin or (best_coin and self.coins[best_coin].perp.yearly_funding_rate < 5.0):
-                    logger.info(f"{Colors.YELLOW}找不到資金費率 >= 5% 的幣種。暫時維持當前部位。{Colors.RESET}")
+                if not best_coin or (
+                    best_coin
+                    and self.coins[best_coin].perp.yearly_funding_rate < self.funding_open_threshold_pct
+                ):
+                    logger.info(
+                        f"{Colors.YELLOW}找不到資金費率 >= {self.funding_open_threshold_pct:.2f}% 的幣種。暫時維持當前部位。{Colors.RESET}"
+                    )
                     return
                 
                 # Make sure the best coin is different from current coin and has better rate

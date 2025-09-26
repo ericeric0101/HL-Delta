@@ -116,7 +116,10 @@
   "trading": {
     "refresh_interval_sec": 60,
     "min_spot_balance_to_open": 50,
-    "target_perp_leverage": 1.0
+    "target_perp_leverage": 1.0,
+    "funding_check_minute": 50,
+    "funding_open_threshold_pct": 5.0,
+    "funding_replace_threshold_pct": 5.0
   },
   "api": {
     "host": "0.0.0.0",
@@ -135,6 +138,9 @@
   - `refresh_interval_sec`: 主迴圈檢查頻率（秒）。
   - `min_spot_balance_to_open`: 開倉前保留在現貨帳戶的最低 USDC 金額，確保錢包不會被全數用盡。
   - `target_perp_leverage`: 計算永續腿名目金額時的目標槓桿，用來限制新倉位的規模（預設 1.0 代表力求 1 倍）。
+  - `funding_check_minute`: 每小時第幾分鐘執行資金費率檢查（預設 50 代表整點前 10 分）。
+  - `funding_open_threshold_pct`: 沒有持倉時，若年化資金費率高於此值才會開新倉。
+  - `funding_replace_threshold_pct`: 已持倉時，若當前收益率低於此值才會尋找其它幣種並嘗試換倉。
 - **分配設定:**
   - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）
   - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）

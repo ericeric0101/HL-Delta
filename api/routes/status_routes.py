@@ -3,9 +3,11 @@ Status routes for the Delta bot API.
 """
 
 import logging
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+
+from ..utils.db_logger import db_logger
 
 # Logger
 logger = logging.getLogger("StatusRoutes")
@@ -162,4 +164,35 @@ async def get_positions():
         )
     except Exception as e:
         logger.error(f"Error getting positions: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/trade-history")
+async def get_trade_history(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100)
+):
+    """Get paginated trade history from the database."""
+    if not db_logger.client:
+        raise HTTPException(status_code=503, detail="Supabase client is not configured or available.")
+
+    try:
+        # Calculate offset for pagination
+        offset = (page - 1) * limit
+        
+        # Query Supabase with pagination and ordering
+        query = db_logger.client.table('trade_logs').select("*", count='exact').order('timestamp', desc=True).range(offset, offset + limit - 1)
+        result = query.execute()
+
+        total_records = result.count or 0
+        
+        return {
+            "trades": result.data or [],
+            "total": total_records,
+            "page": page,
+            "limit": limit,
+            "totalPages": (total_records + limit - 1) // limit if total_records > 0 else 0
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting trade history: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred while fetching trade history: {e}")

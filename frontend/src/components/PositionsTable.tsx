@@ -32,14 +32,14 @@ const PositionsTable: React.FC<PositionsTableProps> = ({ positions }) => {
       <Table sx={{ minWidth: 650 }} aria-label="positions table">
         <TableHead sx={{ bgcolor: 'grey.50' }}>
           <TableRow>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>Coin</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>Type</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Size</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Entry Price</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Position Value</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Unrealized PNL</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Leverage</TableCell>
-            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">Liq. Price</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>幣種</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }}>種類</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">頭寸</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">開倉價格</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">倉位價值</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">未實現PNL</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">槓桿</TableCell>
+            <TableCell sx={{ fontWeight: '600', color: 'text.secondary', border: 0 }} align="right">強平價格</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>

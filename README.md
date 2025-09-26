@@ -76,6 +76,10 @@ Example using environment variables:
 export HYPERLIQUID_PRIVATE_KEY={PRIVATE_KEY}
 export HYPERLIQUID_ADDRESS={SUB_ACCOUNT_TRADING_ADDRESS}
 export API_SECRET_KEY={YOUR_SECRET_KEY}
+
+# Optional: For persistent trade logging
+export SUPABASE_URL={YOUR_SUPABASE_URL}
+export SUPABASE_KEY={YOUR_SUPABASE_SERVICE_KEY}
 ```
 
 ## Quick Start

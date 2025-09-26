@@ -15,6 +15,8 @@ import eth_account
 from eth_account.signers.local import LocalAccount
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any, Tuple
+from datetime import datetime
+from api.utils.db_logger import db_logger
 
 # ANSI color codes for colored terminal output
 class Colors:
@@ -164,13 +166,17 @@ class Delta:
                 
                 for perp_coin in perp_coins:
                     if perp_coin["name"] == coin_name:
-                        self.coins[coin_name].perp = PerpMarket(
-                            name=perp_coin["name"],
-                            sz_decimals=perp_coin["szDecimals"],
-                            max_leverage=perp_coin["maxLeverage"],
-                            index=perp_coins.index(perp_coin),
-                            tick_size=self.coins[coin_name].spot.tick_size
-                        )
+                        # Only create the perp market if the corresponding spot market was found
+                        if self.coins[coin_name].spot:
+                            self.coins[coin_name].perp = PerpMarket(
+                                name=perp_coin["name"],
+                                sz_decimals=perp_coin["szDecimals"],
+                                max_leverage=perp_coin["maxLeverage"],
+                                index=perp_coins.index(perp_coin),
+                                tick_size=self.coins[coin_name].spot.tick_size
+                            )
+                        else:
+                            logger.warning(f"Found perpetual market for '{coin_name}' but no corresponding spot market. This coin will not be available for delta-neutral trading.")
             
             self.total_raw_usd = float(self.margin_summary["totalRawUsd"])
             self.account_value = float(self.margin_summary["accountValue"])
@@ -229,6 +235,45 @@ class Delta:
         except Exception as e:
             logger.error(f"初始化客戶端失敗: {e}")
             raise RuntimeError("客戶端初始化失敗") from e
+    def _log_order_submission(self, coin: str, market: str, side: str, size: float, price: float, order_result: dict, operation_type: str):
+        """Helper to log order submission details to Supabase."""
+        try:
+            status = order_result.get('status')
+            if status == 'ok':
+                response_data = order_result.get('response', {}).get('data', {})
+                order_status_info = response_data.get('statuses', [{}])[0]
+                
+                order_id = None
+                status_str = ""
+                
+                if 'resting' in order_status_info:
+                    order_id = int(order_status_info['resting']['oid'])
+                    status_str = "resting"
+                elif 'filled' in order_status_info:
+                    order_id = int(order_status_info['filled']['oid'])
+                    status_str = "filled"
+                elif 'error' in order_status_info:
+                    status_str = f"error: {order_status_info['error']}"
+                
+                trade_data = {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'coin': coin,
+                    'market': market,
+                    'side': side,
+                    'price': price,
+                    'size': size,
+                    'order_id': order_id,
+                    'order_status': status_str,
+                    'operation_type': operation_type,
+                    'raw_response': json.dumps(order_result) # Store the raw response for debugging
+                }
+                db_logger.log_trade(trade_data)
+            else:
+                logger.warning(f"Order submission for {coin} {market} failed, status: {status}. Not logging to DB.")
+
+        except Exception as e:
+            logger.error(f"Error in _log_order_submission for {coin}: {e}", exc_info=True)
+
     def _get_required_env(self, env_name):
         """Get a required environment variable or raise an informative error."""
         value = os.getenv(env_name)
@@ -577,9 +622,11 @@ class Delta:
             spot_pair = f"{spot_name}/USDC"
             
             spot_order_result = self.exchange.order(spot_pair, True, spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
+            self._log_order_submission(coin_name, 'spot', 'buy', spot_size, spot_limit_price, spot_order_result, 'opening')
             
             logger.info(f"正在建立 {coin_name} 的永續合約限價空單: {perp_size} @ {perp_limit_price} (僅掛單)")
             perp_order_result = self.exchange.order(coin_name, False, perp_size, perp_limit_price, {"limit": {"tif": "Alo"}})
+            self._log_order_submission(coin_name, 'perp', 'sell', perp_size, perp_limit_price, perp_order_result, 'opening')
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -722,6 +769,7 @@ class Delta:
                     
                     logger.info(f"重新掛單現貨 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
                     result = self.exchange.order(spot_pair, side, rounded_size, rounded_price, {"limit": {"tif": "Alo"}})
+                    self._log_order_submission(coin_name, 'spot', 'buy' if side else 'sell', rounded_size, rounded_price, result, 'relisting')
                     # Update oid
                     if result and result.get('status') == 'ok':
                         response = result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
@@ -739,6 +787,7 @@ class Delta:
 
                     logger.info(f"重新掛單永續合約 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
                     result = self.exchange.order(coin_name, side, rounded_size, rounded_price, {"limit": {"tif": "Alo"}})
+                    self._log_order_submission(coin_name, 'perp', 'buy' if side else 'sell', rounded_size, rounded_price, result, 'relisting')
                     # Update oid
                     if result and result.get('status') == 'ok':
                         response = result.get('response', {}).get('data', {}).get('statuses', [{}])[0]
@@ -821,6 +870,7 @@ class Delta:
                 
                 # For sell orders, side is False (sell)
                 spot_order_result = self.exchange.order(spot_pair, False, rounded_spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'spot', 'sell', rounded_spot_size, spot_limit_price, spot_order_result, 'closing')
             
             # For perp, we need to buy back our short position
             if perp_size < 0:
@@ -830,6 +880,7 @@ class Delta:
                 
                 # For buy orders, side is True (buy)
                 perp_order_result = self.exchange.order(coin_name, True, buy_size, perp_limit_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'perp', 'buy', buy_size, perp_limit_price, perp_order_result, 'closing')
             
             # Use the shared helper method to track orders
             return self._extract_and_track_order_ids(
@@ -945,10 +996,12 @@ class Delta:
 
                 # Place spot sell order
                 spot_pair = self._get_spot_pair(coin_name)
-                self.exchange.order(spot_pair, False, adjustment_size_spot, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+                spot_order_result = self.exchange.order(spot_pair, False, adjustment_size_spot, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'spot', 'sell', adjustment_size_spot, self.round_price(coin_name, best_ask), spot_order_result, 'rebalancing')
                 
                 # Place perp buy order
-                self.exchange.order(coin_name, True, adjustment_size_perp, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+                perp_order_result = self.exchange.order(coin_name, True, adjustment_size_perp, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'perp', 'buy', adjustment_size_perp, self.round_price(coin_name, best_bid), perp_order_result, 'rebalancing')
 
             else: # perp_value > spot_value
                 # Buy spot, Sell (open) perp
@@ -964,10 +1017,12 @@ class Delta:
 
                 # Place spot buy order
                 spot_pair = self._get_spot_pair(coin_name)
-                self.exchange.order(spot_pair, True, adjustment_size_spot, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+                spot_order_result = self.exchange.order(spot_pair, True, adjustment_size_spot, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'spot', 'buy', adjustment_size_spot, self.round_price(coin_name, best_bid), spot_order_result, 'rebalancing')
 
                 # Place perp sell order
-                self.exchange.order(coin_name, False, adjustment_size_perp, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+                perp_order_result = self.exchange.order(coin_name, False, adjustment_size_perp, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'perp', 'sell', adjustment_size_perp, self.round_price(coin_name, best_ask), perp_order_result, 'rebalancing')
             
             logger.info(f"已為 {coin_name} 送出再平衡訂單。")
 
@@ -1167,6 +1222,27 @@ class Delta:
                             }
                             
                 logger.info(f"{Colors.GREEN}成功刷新部位資料{Colors.RESET}")
+
+                # --- Log Account Snapshot ---
+                try:
+                    # Re-calculate account values after state refresh
+                    self.margin_summary = self.user_state["marginSummary"]
+                    perp_account_value = float(self.user_state['crossMarginSummary'].get('accountValue', 0))
+                    spot_account_value = self._get_total_spot_account_value()
+                    total_account_value = spot_account_value + perp_account_value
+                    total_margin_used = float(self.margin_summary["totalMarginUsed"])
+
+                    snapshot_data = {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "account_value": total_account_value,
+                        "spot_account_value": spot_account_value,
+                        "perp_account_value": perp_account_value,
+                        "total_margin_used": total_margin_used,
+                    }
+                    db_logger.log_account_snapshot(snapshot_data)
+                except Exception as e:
+                    logger.error(f"{Colors.RED}紀錄帳戶快照失敗: {e}{Colors.RESET}", exc_info=True)
+                # --- End of Snapshot ---
                 
                 # Display detailed position information in hourly check
                 self.display_position_info()

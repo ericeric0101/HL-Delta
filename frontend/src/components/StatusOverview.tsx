@@ -63,7 +63,7 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
       <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 2, height: '100%', borderRadius: 1 }}>
           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-            Account Value
+            帳戶總值
           </Typography>
           <Typography variant="h4" fontWeight={700}>
             ${status.account.total_value.toFixed(2)}
@@ -74,7 +74,7 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
       <Grid size={{ xs: 12, md: 6 }}>
         <Paper sx={{ p: 2, height: '100%', borderRadius: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-            Bot Status
+            Bot 狀態
           </Typography>
           <Chip
             icon={running ? <PlayCircleOutlineIcon /> : <PowerSettingsNewIcon />}
@@ -90,7 +90,7 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
       <Grid size={{ xs: 12 }}>
         <Paper sx={{ p: 2.5, borderRadius: 1 }}>
           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-            Bot Controls
+            Bot 控制
           </Typography>
 
           {/* 水平排列；空間不夠自動換行，不會擠在一起 */}
@@ -105,9 +105,9 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
               color="success"
               onClick={handleStart}
               disabled={running}
-              sx={{ minWidth: 136 }}
+              sx={{ minWidth: 100 }}
             >
-              Start
+              啟動
             </Button>
 
             <Button
@@ -115,18 +115,18 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
               color="warning"
               onClick={handleStop}
               disabled={!running}
-              sx={{ minWidth: 136 }}
+              sx={{ minWidth: 100 }}
             >
-              Stop
+              終止
             </Button>
 
             <Button
               variant="contained"
               color="error"
               onClick={handleShutdown}
-              sx={{ minWidth: 200 }}
+              sx={{ minWidth: 100 }}
             >
-              Shutdown Backend
+              關閉後端
             </Button>
           </Stack>
         </Paper>

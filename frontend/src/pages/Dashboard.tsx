@@ -9,10 +9,12 @@ import {
   Box,
   Paper,
   CircularProgress,
+  IconButton,
   Alert,
   Tabs,
   Tab,
 } from '@mui/material';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import StatusOverview from '../components/StatusOverview';
 import PositionsTable from '../components/PositionsTable';
 import ConfigManager from '../components/ConfigManager';
@@ -92,9 +94,14 @@ const Dashboard: React.FC = () => {
               {/* Current Positions */}
               <Grid size={{ xs: 12, md: 8 }}>
                 <Paper sx={{ p: 2, display: 'flex', flexDirection: 'column', height: '100%' }}>
-                  <Typography variant="h6" gutterBottom fontWeight={600}>
-                    目前持倉
-                  </Typography>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="h6" gutterBottom fontWeight={600}>
+                      目前持倉
+                    </Typography>
+                    <IconButton onClick={refresh} disabled={loading} aria-label="refresh positions">
+                      <RefreshIcon />
+                    </IconButton>
+                  </Box>
                   {loading && !status ? (
                     <CircularProgress />
                   ) : error ? (

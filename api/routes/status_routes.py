@@ -42,7 +42,10 @@ async def get_status():
                     "type": "spot",
                     "size": spot_position.get("total", 0),
                     "value": spot_position.get("entry_ntl", 0),
-                    "hold": spot_position.get("hold", 0)
+                    "hold": spot_position.get("hold", 0),
+                    "entry_price": spot_position.get("entry_price"),
+                    "position_value": spot_position.get("position_value"),
+                    "unrealized_pnl": spot_position.get("unrealized_pnl")
                 })
             
             if coin_info.perp and hasattr(coin_info.perp, 'position') and coin_info.perp.position:
@@ -73,8 +76,11 @@ async def get_status():
         account_info = {
             "address": bot.address,
             "total_value": bot.account_value,
+            "spot_value": getattr(bot, 'spot_account_value', None),
+            "perp_value": bot.perp_user_state if hasattr(bot, 'perp_user_state') else None,
             "margin_used": bot.total_margin_used if hasattr(bot, 'total_margin_used') else None,
-            "total_raw_usd": bot.total_raw_usd if hasattr(bot, 'total_raw_usd') else None
+            "total_raw_usd": bot.total_raw_usd if hasattr(bot, 'total_raw_usd') else None,
+            "margin_account_value": getattr(bot, 'margin_account_value', None)
         }
         
         # Return all status information
@@ -139,7 +145,10 @@ async def get_positions():
                     "type": "spot",
                     "size": spot_position.get("total", 0),
                     "value": spot_position.get("entry_ntl", 0),
-                    "hold": spot_position.get("hold", 0)
+                    "hold": spot_position.get("hold", 0),
+                    "entry_price": spot_position.get("entry_price"),
+                    "position_value": spot_position.get("position_value"),
+                    "unrealized_pnl": spot_position.get("unrealized_pnl")
                 })
             
             if coin_info.perp and hasattr(coin_info.perp, 'position') and coin_info.perp.position:

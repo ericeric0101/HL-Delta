@@ -2,18 +2,16 @@ import React from 'react';
 import {
   Paper,
   Typography,
-  Box,
   Chip,
   CircularProgress,
   Alert,
   Button,
   Stack,
   Grid,
-  IconButton,
+  Box,
 } from '@mui/material';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
-import RefreshIcon from '@mui/icons-material/Refresh';
 import { BotStatus } from '../types';
 import apiClient from '../api/client';
 
@@ -59,6 +57,7 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
   if (!status) return <Typography>No status data available.</Typography>;
 
   const running = status.running;
+  const formatCurrency = (value?: number | null) => (value != null ? value.toFixed(2) : 'N/A');
 
   return (
     <Grid container spacing={3}>
@@ -71,6 +70,14 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
           <Typography variant="h4" fontWeight={700}>
             ${status.account.total_value.toFixed(2)}
           </Typography>
+          <Box sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary">
+              現貨價值：${formatCurrency(status.account.spot_value)}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              永續價值：${formatCurrency(status.account.perp_value)}
+            </Typography>
+          </Box>
         </Paper>
       </Grid>
 
@@ -96,9 +103,6 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
                 <Typography variant="subtitle2" color="text.secondary" gutterBottom>
                     Bot 控制
                 </Typography>
-                <IconButton onClick={refresh} disabled={loading} aria-label="refresh status">
-                    <RefreshIcon />
-                </IconButton>
             </Box>
 
           {/* 水平排列；空間不夠自動換行，不會擠在一起 */}

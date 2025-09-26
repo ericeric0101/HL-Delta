@@ -71,9 +71,11 @@ async def main():
             logging.FileHandler("delta.log")
         ]
     )
-    
+
+    loop = asyncio.get_running_loop()
+
     # Add the WebSocket handler to the root logger
-    ws_handler = WebSocketLogHandler(manager)
+    ws_handler = WebSocketLogHandler(manager, loop=loop)
     ws_handler.setFormatter(logging.Formatter(log_format, datefmt=log_datefmt))
     logging.getLogger().addHandler(ws_handler)
 
@@ -83,10 +85,8 @@ async def main():
     
     # Create the Delta bot instance
     delta_bot = Delta()
+    await delta_bot.initialize()
     
-    # Get the current asyncio loop
-    loop = asyncio.get_running_loop()
-
     # Register signal handlers for graceful shutdown
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(

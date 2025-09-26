@@ -21,6 +21,7 @@ async def main():
     try:
         # Create Delta instance with config.json
         delta = Delta(config_path="config.json")
+        await delta.initialize()
         
         # Display account and position information
         delta.display_position_info()

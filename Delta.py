@@ -88,18 +88,15 @@ class Delta:
         self.config_path = config_path
         self.config = self._load_config()
         try:
-            # Initialize tracked coins from config
             self.tracked_coins = self.config["general"]["tracked_coins"]
             self.coins: Dict[str, CoinInfo] = {}
             self.pending_orders: List[PendingDeltaOrder] = []
-            self._is_running = False  # Track if the bot is actively running
+            self._is_running = False
             
-            # Set debug mode from config
             if self.config["general"].get("debug", False):
                 logger.setLevel(logging.DEBUG)
                 logger.debug("偵錯模式已啟用")
             
-            # Load credentials from environment variables
             private_key = self._get_required_env("HYPERLIQUID_PRIVATE_KEY")
             self.address = self._get_required_env("HYPERLIQUID_ADDRESS")
             
@@ -108,184 +105,190 @@ class Delta:
             self.info = Info(constants.MAINNET_API_URL, skip_ws=True)
             self.api_url = constants.MAINNET_API_URL
             
-            self.user_state = self.info.user_state(self.address)
-            self.spot_user_state = self.info.spot_user_state(self.address)
-            self.perp_user_state = self.account_balance = float(self.user_state['crossMarginSummary'].get('accountValue', 0))
-            self.margin_summary = self.user_state["marginSummary"]
-            
-            # Load market data
-            spot_meta = self.info.spot_meta()
-            spot_coins = spot_meta["tokens"]
-            
-            perp_meta = self.info.meta()
-            perp_coins = perp_meta["universe"]
-            
-            for coin_name in self.tracked_coins:
-                self.coins[coin_name] = CoinInfo(name=coin_name)
-                
-                for spot_coin in spot_coins:
-                    if coin_name == "BTC" and spot_coin["name"] == "UBTC":
-                        self.coins[coin_name].spot = SpotMarket(
-                            name=spot_coin["name"],
-                            token_id=spot_coin["tokenId"],
-                            index=spot_coin["index"],
-                            sz_decimals=spot_coin["szDecimals"],
-                            wei_decimals=spot_coin["weiDecimals"],
-                            is_canonical=spot_coin["isCanonical"],
-                            full_name=spot_coin["fullName"],
-                            evm_contract=spot_coin.get("evmContract"),
-                            deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
-                            tick_size=1
-                        )
-                    elif coin_name == "ETH" and spot_coin["name"] == "UETH":
-                        self.coins[coin_name].spot = SpotMarket(
-                            name=spot_coin["name"],
-                            token_id=spot_coin["tokenId"],
-                            index=spot_coin["index"],
-                            sz_decimals=spot_coin["szDecimals"],
-                            wei_decimals=spot_coin["weiDecimals"],
-                            is_canonical=spot_coin["isCanonical"],
-                            full_name=spot_coin["fullName"],
-                            evm_contract=spot_coin.get("evmContract"),
-                            deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
-                            tick_size=0.1
-                        )
-                    elif coin_name == "SOL" and spot_coin["name"] == "USOL":
-                        self.coins[coin_name].spot = SpotMarket(
-                            name=spot_coin["name"],
-                            token_id=spot_coin["tokenId"],
-                            index=spot_coin["index"],
-                            sz_decimals=spot_coin["szDecimals"],
-                            wei_decimals=spot_coin["weiDecimals"],
-                            is_canonical=spot_coin["isCanonical"],
-                            full_name=spot_coin["fullName"],
-                            evm_contract=spot_coin.get("evmContract"),
-                            deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
-                            tick_size=0.001 # Assuming a tick size for SOL, can be adjusted
-                        )
-                    elif coin_name == spot_coin["name"]:
-                        self.coins[coin_name].spot = SpotMarket(
-                            name=spot_coin["name"],
-                            token_id=spot_coin["tokenId"],
-                            index=spot_coin["index"],
-                            sz_decimals=spot_coin["szDecimals"],
-                            wei_decimals=spot_coin["weiDecimals"],
-                            is_canonical=spot_coin["isCanonical"],
-                            full_name=spot_coin["fullName"],
-                            evm_contract=spot_coin.get("evmContract"),
-                            deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
-                            tick_size=0.001
-                        )
-                
-                for perp_coin in perp_coins:
-                    if perp_coin["name"] == coin_name:
-                        # Only create the perp market if the corresponding spot market was found
-                        if self.coins[coin_name].spot:
-                            self.coins[coin_name].perp = PerpMarket(
-                                name=perp_coin["name"],
-                                sz_decimals=perp_coin["szDecimals"],
-                                max_leverage=perp_coin["maxLeverage"],
-                                index=perp_coins.index(perp_coin),
-                                tick_size=self.coins[coin_name].spot.tick_size
-                            )
-                        else:
-                            logger.warning(f"Found perpetual market for '{coin_name}' but no corresponding spot market. This coin will not be available for delta-neutral trading.")
-            
-            self.total_raw_usd = float(self.margin_summary["totalRawUsd"])
-            self.account_value = float(self.margin_summary["accountValue"])
-            self.total_margin_used = float(self.margin_summary["totalMarginUsed"])
-            
-            # Initialize allocation targets from config
-            self.spot_allocation_pct = self.config["allocation"]["spot_pct"] / 100.0
-            self.perp_allocation_pct = self.config["allocation"]["perp_pct"] / 100.0
-            self.rebalance_threshold = self.config["allocation"]["rebalance_threshold"]
-            
-            # Refresh interval
-            self.refresh_interval_sec = self.config["trading"].get("refresh_interval_sec", 60)
-            
-            # Load positions
-            for position in self.user_state.get("assetPositions", []):
-                if position["type"] == "oneWay" and "position" in position:
-                    pos = position["position"]
-                    coin_name = pos["coin"]
-                    if coin_name in self.coins and self.coins[coin_name].perp:
-                        self.coins[coin_name].perp.position = {
-                            "size": float(pos["szi"]),
-                            "entry_price": float(pos["entryPx"]),
-                            "position_value": float(pos["positionValue"]),
-                            "unrealized_pnl": float(pos["unrealizedPnl"]),
-                            "leverage": pos["leverage"]["value"],
-                            "liquidation_price": float(pos["liquidationPx"]),
-                            "cum_funding": pos["cumFunding"]["allTime"]
-                        }
-            
-            for balance in self.spot_user_state.get("balances", []):
-                if float(balance["total"]) > 0:
-                    coin_name = balance["coin"]
-                    
-                    if coin_name == "UBTC":
-                        coin_name = "BTC"
-                    elif coin_name == "UETH":
-                        coin_name = "ETH"
-                    
-                    if coin_name in self.coins and self.coins[coin_name].spot:
-                        self.coins[coin_name].spot.position = {
-                            "total": float(balance["total"]),
-                            "hold": float(balance["hold"]),
-                            "entry_ntl": float(balance["entryNtl"])
-                        }
-            
-            # 重新計算總帳戶價值，以包含現貨資產
-            spot_value = self._get_total_spot_account_value()
-            perp_value = self.perp_user_state
-            
-            # 更新主要的帳戶價值屬性，以反映合併後的總額
-            self.account_value = spot_value + perp_value
-            self.total_raw_usd = self.account_value # 保持一致性
-            
-            logger.info(f"已使用帳戶初始化: {self.address[:8]}...")
-            logger.info(f"總帳戶價值 (現貨 + 合約): ${self.account_value:.2f}")
-        except Exception as e:
-            logger.error(f"初始化客戶端失敗: {e}")
-            raise RuntimeError("客戶端初始化失敗") from e
-    def _log_order_submission(self, coin: str, market: str, side: str, size: float, price: float, order_result: dict, operation_type: str):
-        """Helper to log order submission details to Supabase."""
-        try:
-            status = order_result.get('status')
-            if status == 'ok':
-                response_data = order_result.get('response', {}).get('data', {})
-                order_status_info = response_data.get('statuses', [{}])[0]
-                
-                order_id = None
-                status_str = ""
-                
-                if 'resting' in order_status_info:
-                    order_id = int(order_status_info['resting']['oid'])
-                    status_str = "resting"
-                elif 'filled' in order_status_info:
-                    order_id = int(order_status_info['filled']['oid'])
-                    status_str = "filled"
-                elif 'error' in order_status_info:
-                    status_str = f"error: {order_status_info['error']}"
-                
-                trade_data = {
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'coin': coin,
-                    'market': market,
-                    'side': side,
-                    'price': price,
-                    'size': size,
-                    'order_id': order_id,
-                    'order_status': status_str,
-                    'operation_type': operation_type,
-                    'raw_response': json.dumps(order_result) # Store the raw response for debugging
-                }
-                db_logger.log_trade(trade_data)
-            else:
-                logger.warning(f"Order submission for {coin} {market} failed, status: {status}. Not logging to DB.")
+            self.user_state = {}
+            self.spot_user_state = {}
+            self.margin_summary = {}
+            self.perp_user_state = 0
+            self.account_value = 0
+            self.spot_account_value = 0
+            self.margin_account_value = 0
+            self.total_raw_usd = 0
+            self.total_margin_used = 0
 
         except Exception as e:
-            logger.error(f"Error in _log_order_submission for {coin}: {e}", exc_info=True)
+            logger.error(f"初始化客戶端失敗: {e}", exc_info=True)
+            raise RuntimeError("客戶端初始化失敗") from e
+
+    async def initialize(self):
+        """Performs asynchronous setup tasks after construction."""
+        try:
+            await self._initial_load()
+        except Exception as e:
+            logger.error(f"初始化客戶端失敗: {e}", exc_info=True)
+            raise RuntimeError("客戶端初始化失敗") from e
+
+    async def _initial_load(self):
+        """Loads all initial market data and user states."""
+        logger.info("正在載入市場資料與帳戶狀態...")
+        self.user_state = self.info.user_state(self.address)
+        self.spot_user_state = self.info.spot_user_state(self.address)
+        self.margin_summary = self.user_state["marginSummary"]
+
+        spot_meta = self.info.spot_meta()
+        spot_coins = spot_meta["tokens"]
+        perp_meta = self.info.meta()
+        perp_coins = perp_meta["universe"]
+        
+        for coin_name in self.tracked_coins:
+            self.coins[coin_name] = CoinInfo(name=coin_name)
+            spot_market_found = False
+            for spot_coin in spot_coins:
+                if (coin_name == "BTC" and spot_coin["name"] == "UBTC") or \
+                   (coin_name == "ETH" and spot_coin["name"] == "UETH") or \
+                   (coin_name == "SOL" and spot_coin["name"] == "USOL") or \
+                   (coin_name == spot_coin["name"]):
+                    self.coins[coin_name].spot = SpotMarket(
+                        name=spot_coin["name"],
+                        token_id=spot_coin["tokenId"],
+                        index=spot_coin["index"],
+                        sz_decimals=spot_coin["szDecimals"],
+                        wei_decimals=spot_coin["weiDecimals"],
+                        is_canonical=spot_coin["isCanonical"],
+                        full_name=spot_coin["fullName"],
+                        evm_contract=spot_coin.get("evmContract"),
+                        deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
+                        tick_size=0.001 # Default, will be overwritten for major pairs
+                    )
+                    if coin_name == "BTC": self.coins[coin_name].spot.tick_size = 1
+                    elif coin_name == "ETH": self.coins[coin_name].spot.tick_size = 0.1
+                    spot_market_found = True
+                    break
+            
+            if spot_market_found:
+                for perp_coin in perp_coins:
+                    if perp_coin["name"] == coin_name:
+                        self.coins[coin_name].perp = PerpMarket(
+                            name=perp_coin["name"],
+                            sz_decimals=perp_coin["szDecimals"],
+                            max_leverage=perp_coin["maxLeverage"],
+                            index=perp_coins.index(perp_coin),
+                            tick_size=self.coins[coin_name].spot.tick_size
+                        )
+                        break
+            
+            if not self.coins[coin_name].spot or not self.coins[coin_name].perp:
+                logger.warning(f"'{coin_name}' 的市場配對不完整 (現貨: {"有" if self.coins[coin_name].spot else "無"}, 合約: {"有" if self.coins[coin_name].perp else "無"})，將無法交易。")
+
+        self.spot_allocation_pct = self.config["allocation"]["spot_pct"] / 100.0
+        self.perp_allocation_pct = self.config["allocation"]["perp_pct"] / 100.0
+        self.rebalance_threshold = self.config["allocation"]["rebalance_threshold"]
+
+        trading_cfg = self.config.get("trading", {})
+        self.refresh_interval_sec = trading_cfg.get("refresh_interval_sec", 60)
+        self.min_spot_balance_to_open = float(trading_cfg.get("min_spot_balance_to_open", 50))
+        self.target_perp_leverage = max(float(trading_cfg.get("target_perp_leverage", 1.0)), 0.1)
+        
+        await self._update_positions()
+        logger.info(f"已使用帳戶初始化: {self.address[:8]}...")
+        logger.info(f"總帳戶價值 (現貨 + 合約): ${self.account_value:.2f}")
+    async def _log_filled_trade(self, oid: int, operation_type: str):
+        """Queries the details of a filled order by its OID and logs it to the database."""
+        try:
+            order_status = self.info.query_order_by_oid(self.address, oid)
+            if not order_status or 'order' not in order_status or order_status['order']['status'] != 'filled':
+                logger.warning(f"試圖記錄訂單 {oid}，但其狀態不是 'filled'。將略過記錄。")
+                return
+
+            order_info = order_status['order']
+            coin = order_info['coin']
+            market = 'spot' if order_info['isSpot'] else 'perp'
+            side = 'buy' if order_info['side'] == 'B' else 'sell'
+            
+            # Use precise fill data
+            avg_fill_price = float(order_info['avgFillPx'])
+            filled_size = float(order_info['sz'])
+
+            trade_data = {
+                'timestamp': datetime.fromtimestamp(order_info['timestamp'] / 1000).isoformat(),
+                'coin': coin,
+                'market': market,
+                'side': side,
+                'price': avg_fill_price,
+                'size': filled_size,
+                'order_id': oid,
+                'order_status': 'filled',
+                'operation_type': operation_type,
+                'raw_response': json.dumps(order_status) 
+            }
+            db_logger.log_trade(trade_data)
+
+        except Exception as e:
+            logger.error(f"記錄已成交訂單 {oid} 時發生錯誤: {e}", exc_info=True)
+
+    async def _finalize_successful_execution(
+        self,
+        coin_name: str,
+        spot_oid: Optional[int],
+        perp_oid: Optional[int],
+        operation_type: str,
+    ):
+        """Refresh cached positions and record successful trades."""
+        try:
+            await self._update_positions()
+            logger.info(f"{coin_name} 的持倉狀態已更新。")
+        except Exception as e:
+            logger.error(f"{coin_name} 的持倉狀態更新失敗: {e}", exc_info=True)
+
+        for oid in (spot_oid, perp_oid):
+            if oid:
+                await self._log_filled_trade(oid, operation_type)
+
+    def _log_order_submission(
+        self,
+        coin_name: str,
+        market: str,
+        side: str,
+        size: float,
+        price: float,
+        result: Optional[dict],
+        context: str,
+    ) -> None:
+        """Log the outcome of an order submission for easier troubleshooting."""
+        try:
+            status = result.get("status") if isinstance(result, dict) else None
+            response = result.get("response", {}) if isinstance(result, dict) else {}
+            oid = None
+            state = "unknown"
+            error_msg = None
+
+            if status == "ok":
+                statuses = response.get("data", {}).get("statuses", [])
+                if statuses:
+                    raw_status = statuses[0]
+                    if "filled" in raw_status:
+                        state = "filled"
+                        oid = int(raw_status["filled"].get("oid", 0))
+                    elif "resting" in raw_status:
+                        state = "resting"
+                        oid = int(raw_status["resting"].get("oid", 0))
+                    elif "error" in raw_status:
+                        state = "error_response"
+                        error_msg = raw_status.get("error")
+                    else:
+                        state = "accepted"
+                logger.info(
+                    f"訂單提交成功 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price} 狀態:{state} OID:{oid}"
+                )
+                if error_msg:
+                    logger.error(f"訂單提交回傳錯誤訊息: {error_msg}")
+            else:
+                error_msg = response or result
+                logger.error(
+                    f"訂單提交失敗 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price}，回傳: {error_msg}"
+                )
+        except Exception as e:
+            logger.error(f"記錄訂單提交結果時發生錯誤: {e}", exc_info=True)
+
 
     def _get_required_env(self, env_name):
         """Get a required environment variable or raise an informative error."""
@@ -327,10 +330,11 @@ class Delta:
         return total_usdc
 
     def _get_spot_account_USDC(self):
-        spot_user_state = self.info.spot_user_state(self.address)
-        for balance in spot_user_state["balances"]:
-            if balance["coin"] == "USDC":
-                return float(balance["total"])
+        if not self.spot_user_state:
+            self.spot_user_state = self.info.spot_user_state(self.address)
+        for balance in self.spot_user_state.get("balances", []):
+            if balance.get("coin") == "USDC":
+                return float(balance.get("total", 0))
         return 0
     
     def _get_spot_price(self, coin_name):
@@ -383,16 +387,44 @@ class Delta:
             return 0
 
         # Use the available USDC in the spot account as the basis for our position size.
+        min_balance_threshold = getattr(self, "min_spot_balance_to_open", 50.0)
+        target_perp_leverage = getattr(self, "target_perp_leverage", 1.0)
+
         available_usdc = self._get_spot_account_USDC()
-        
-        # We aim to use a significant portion of our spot capital for the delta-neutral position.
-        # Let's use 95% of our spot USDC to open the position.
-        capital_for_position = available_usdc * 0.95
-        
-        if capital_for_position < 10:
-            logger.warning(f"總可用於部位的資金不足: ${capital_for_position:.2f}")
+
+        if available_usdc < min_balance_threshold:
+            logger.info(
+                f"現貨 USDC 餘額 ${available_usdc:.2f} 低於開倉保留閾值 ${min_balance_threshold:.2f}，跳過計算。"
+            )
             return 0
-        
+
+        usable_usdc = max(0, available_usdc - min_balance_threshold)
+        if usable_usdc < 10:
+            logger.info(
+                f"扣除保留金後可用 USDC 僅 ${usable_usdc:.2f}，低於最低交易門檻 $10。"
+            )
+            return 0
+
+        # Use at most 95% of the usable capital to leave a small buffer for fees/slippage.
+        capital_for_position = usable_usdc * 0.95
+
+        if capital_for_position < 10:
+            logger.info(
+                f"扣除緩衝後可用資金 ${capital_for_position:.2f} 低於 $10，跳過建立 {coin_name} 部位。"
+            )
+            return 0
+
+        if self.perp_user_state > 0 and target_perp_leverage > 0:
+            max_notional_allowed = self.perp_user_state * target_perp_leverage
+            if max_notional_allowed <= 0:
+                logger.info("永續帳戶價值不足以支援新部位。")
+                return 0
+            if capital_for_position > max_notional_allowed:
+                logger.info(
+                    f"依照目標槓桿 {target_perp_leverage:.2f}x，永續可動用資金為 ${max_notional_allowed:.2f}，將限制開倉規模。"
+                )
+                capital_for_position = max_notional_allowed
+
         # The size of the spot leg determines the size of the perp leg.
         # The USDC required for the spot leg is size * price.
         # Let's allocate the configured percentage of our capital to the spot purchase.
@@ -428,16 +460,41 @@ class Delta:
         
         return rounded_size
     
+    def _normalize_spot_coin(self, coin_name: str) -> str:
+        if coin_name == "UBTC":
+            return "BTC"
+        if coin_name == "UETH":
+            return "ETH"
+        if coin_name == "USOL":
+            return "SOL"
+        return coin_name
+
     def _get_total_spot_account_value(self):
-        total_spot_value = self._get_spot_account_USDC()
-        for coin_name, coin_info in self.coins.items():
-            if coin_info.spot and hasattr(coin_info.spot, 'position') and coin_info.spot.position and "total" in coin_info.spot.position:
-                total_spot_value += coin_info.spot.position["total"] * self._get_spot_price(coin_name)
+        if not self.spot_user_state:
+            self.spot_user_state = self.info.spot_user_state(self.address)
+
+        total_spot_value = 0.0
+        for balance in self.spot_user_state.get("balances", []):
+            total = float(balance.get("total", 0))
+            if total <= 0:
+                continue
+
+            usd_value = balance.get("usdValue")
+            if usd_value is not None:
+                total_spot_value += float(usd_value)
+                continue
+
+            coin_name = self._normalize_spot_coin(balance.get("coin", ""))
+            price = 1.0 if coin_name == "USDC" else self._get_spot_price(coin_name)
+            total_spot_value += total * price
+
         return total_spot_value
-	
+
     def _get_spot_account_value(self):
-        spot_user_state = self.info.spot_user_state(self.address)
-        for balance in spot_user_state["balances"]:
+        # Legacy debug helper retained for compatibility
+        if not self.spot_user_state:
+            self.spot_user_state = self.info.spot_user_state(self.address)
+        for balance in self.spot_user_state.get("balances", []):
             print(balance)
     
     def spot_perp_repartition(self):
@@ -483,6 +540,104 @@ class Delta:
         is_delta_neutral = is_proper_direction and is_within_margin
         
         return is_delta_neutral, perp_size, spot_size, diff_percentage
+
+    async def _update_positions(self):
+        """Fetches and updates the bot's internal state for all spot and perp positions."""
+        try:
+            logger.info("正在刷新持倉狀態...")
+            self.user_state = self.info.user_state(self.address)
+            self.spot_user_state = self.info.spot_user_state(self.address)
+
+            # Clear existing position data before updating
+            for coin in self.coins.values():
+                if coin.perp: coin.perp.position = {}
+                if coin.spot: coin.spot.position = {}
+
+            # Update perp positions
+            for position in self.user_state.get("assetPositions", []):
+                if position["type"] == "oneWay" and "position" in position:
+                    pos = position["position"]
+                    coin_name = pos["coin"]
+                    if coin_name in self.coins and self.coins[coin_name].perp:
+                        self.coins[coin_name].perp.position = {
+                            "size": float(pos["szi"]),
+                            "entry_price": float(pos["entryPx"]),
+                            "position_value": float(pos["positionValue"]),
+                            "unrealized_pnl": float(pos["unrealizedPnl"]),
+                            "leverage": pos["leverage"]["value"],
+                            "liquidation_price": float(pos["liquidationPx"]),
+                            "cum_funding": pos["cumFunding"]["allTime"]
+                        }
+            
+            # Update spot positions
+            for balance in self.spot_user_state.get("balances", []):
+                total_amount = float(balance.get("total", 0))
+                if total_amount <= 0:
+                    continue
+
+                raw_coin_name = balance.get("coin", "")
+                coin_name = self._normalize_spot_coin(raw_coin_name)
+                if coin_name not in self.coins or not self.coins[coin_name].spot:
+                    continue
+
+                hold_amount = float(balance.get("hold", 0))
+                entry_ntl = float(balance.get("entryNtl", 0))
+                entry_price = None
+                if entry_ntl and total_amount:
+                    try:
+                        entry_price = entry_ntl / total_amount
+                    except ZeroDivisionError:
+                        entry_price = None
+
+                current_price = self._get_spot_price(coin_name)
+                position_value = None
+                unrealized_pnl = None
+                if current_price:
+                    position_value = total_amount * current_price
+                    if entry_price is not None:
+                        unrealized_pnl = position_value - entry_ntl
+
+                self.coins[coin_name].spot.position = {
+                    "total": total_amount,
+                    "hold": hold_amount,
+                    "entry_ntl": entry_ntl,
+                    "entry_price": entry_price,
+                    "position_value": position_value,
+                    "unrealized_pnl": unrealized_pnl,
+                    "mark_price": current_price
+                }
+            # Update derived account metrics
+            self.margin_summary = self.user_state.get("marginSummary", {})
+            cross_summary = self.user_state.get("crossMarginSummary", {})
+
+            spot_account_value = self._get_total_spot_account_value()
+            cross_account_value = cross_summary.get("accountValue")
+            self.perp_user_state = float(cross_account_value) if cross_account_value is not None else 0.0
+
+            margin_account_value = self.margin_summary.get("accountValue")
+            if margin_account_value is not None:
+                self.margin_account_value = float(margin_account_value)
+            else:
+                self.margin_account_value = 0.0
+
+            self.account_value = spot_account_value + self.perp_user_state
+
+            total_margin_used_value = self.margin_summary.get("totalMarginUsed", 0)
+            self.total_margin_used = float(total_margin_used_value) if total_margin_used_value is not None else 0.0
+
+            total_raw_usd = self.margin_summary.get("totalRawUsd")
+            self.total_raw_usd = float(total_raw_usd) if total_raw_usd is not None else self.account_value
+            self.spot_account_value = spot_account_value
+
+            logger.info(
+                f"帳戶價值明細 -> 現貨: ${spot_account_value:.2f}, 永續: ${self.perp_user_state:.2f}, 總計: ${self.account_value:.2f}"
+            )
+
+            logger.info("持倉狀態刷新完成。")
+        except Exception as e:
+            logger.error("刷新持倉狀態時發生錯誤", exc_info=True)
+            raise
+
     
     def get_best_yearly_funding_rate(self):
         best_rate = 0
@@ -589,133 +744,13 @@ class Delta:
         """Executes the full hybrid maker-taker strategy for opening or closing a position."""
         # --- 1. Maker Attempt ---
         logger.info(f"階段 1: 嘗試以 Maker 方式 {side} {coin_name} 部位...")
+        operation_type = 'closing' if side == 'closing' else 'opening'
         spot_info, perp_info, spot_size, perp_size = await self._attempt_order_placement(coin_name, side, 'maker')
 
-        if spot_info and perp_info and spot_info["status"] == 'ok' and perp_info["status"] == 'ok':
-            logger.info(f"Maker 訂單提交成功 (現貨: {spot_info['state']}, 合約: {perp_info['state']})。")
-            pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=(side == 'closing'))
-            pending_order.spot_oid = spot_info['oid']
-            pending_order.perp_oid = perp_info['oid']
-            pending_order.spot_filled = spot_info['state'] == 'filled'
-            pending_order.perp_filled = perp_info['state'] == 'filled'
-            
-            if not (pending_order.spot_filled and pending_order.perp_filled):
-                MAKER_WAIT_SECONDS = 5
-                logger.info(f"等待 {MAKER_WAIT_SECONDS} 秒觀察 Maker 訂單成交情況...")
-                await asyncio.sleep(MAKER_WAIT_SECONDS)
-
-                spot_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.spot_oid)
-                perp_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.perp_oid)
-                spot_filled_after_wait = spot_status_after_wait.get('order', {}).get('status') != 'open'
-                perp_filled_after_wait = perp_status_after_wait.get('order', {}).get('status') != 'open'
-
-                if spot_filled_after_wait and perp_filled_after_wait:
-                    logger.info("Maker 訂單在等待期間完全成交！")
-                    pending_order.spot_filled = True
-                    pending_order.perp_filled = True
-                    self.pending_orders.append(pending_order)
-                    return True
-                else:
-                    logger.warning("Maker 訂單未在時限內完全成交，取消並轉為 Taker 策略。")
-                    await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
-            else:
-                self.pending_orders.append(pending_order)
-                return True
-        else:
-            await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
-
-        # --- 2. Taker Attempt ---
-        logger.info(f"階段 2: 嘗試以 Taker 方式 {side} {coin_name} 部位...")
-        spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker = await self._attempt_order_placement(coin_name, side, 'taker')
-
-        if spot_info_taker and perp_info_taker and spot_info_taker["state"] == 'filled' and perp_info_taker["state"] == 'filled':
-            logger.info("Taker 方式成功，兩邊均已立即成交。")
-            return True
-        else:
-            logger.error("Taker 方式失敗，執行緊急回滾。")
-            await self._rollback_position(coin_name, spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker)
+        if not all([spot_info, perp_info, spot_size, perp_size]):
+            logger.info(f"{coin_name} 的 {operation_type} Maker 嘗試因資金或掛單限制未能建立有效規模。")
             return False
 
-
-
-    async def _rollback_position(self, coin_name: str, spot_info: dict, perp_info: dict, spot_size: float, perp_size: float):
-        """Rollback logic to cancel resting orders or market-close filled orders."""
-        logger.warning("開倉/平倉不完全成功，啟動回滾程序...")
-        spot_pair = self._get_spot_pair(coin_name)
-
-        if spot_info and spot_info["status"] == 'ok':
-            if spot_info['state'] == 'resting':
-                logger.info(f"正在取消未成交的現貨訂單 {spot_info['oid']}...")
-                self.exchange.cancel(spot_pair, spot_info['oid'])
-            elif spot_info['state'] == 'filled':
-                logger.critical(f"現貨訂單 {spot_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
-                side_to_rollback = not (spot_info.get('side') == 'buy')
-                self.exchange.order(spot_pair, side_to_rollback, spot_size, 0, {"market": True})
-
-        if perp_info and perp_info["status"] == 'ok':
-            if perp_info['state'] == 'resting':
-                logger.info(f"正在取消未成交的合約訂單 {perp_info['oid']}...")
-                self.exchange.cancel(coin_name, perp_info['oid'])
-            elif perp_info['state'] == 'filled':
-                logger.critical(f"合約訂單 {perp_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
-                side_to_rollback = not (perp_info.get('side') == 'buy')
-                self.exchange.order(coin_name, side_to_rollback, perp_size, 0, {"market": True})
-
-    async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:
-        """Attempts to place orders based on side (opening/closing) and type (maker/taker)."""
-        try:
-            l2_book = self.info.l2_snapshot(coin_name)
-            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
-                logger.warning(f"無法取得 {coin_name} 的 L2 訂單簿。")
-                return None, None, None, None
-
-            best_bid = float(l2_book["levels"][0][0]['px'])
-            best_ask = float(l2_book["levels"][1][0]['px'])
-
-            if order_type == 'maker':
-                spot_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
-                perp_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
-                order_params = {"limit": {"tif": "Alo"}}
-            else: # taker
-                spot_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
-                perp_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
-                order_params = {"limit": {"tif": "Ioc"}} # Immediate Or Cancel
-
-            if side == 'opening':
-                spot_size = self._calculate_optimal_spot_size(coin_name)
-                if spot_size <= 0: return None, None, None, None
-                perp_size = spot_size
-            else: # closing
-                _, perp_size_val, spot_size_val, _ = self.has_delta_neutral_position(coin_name)
-                spot_size = spot_size_val
-                perp_size = abs(perp_size_val)
-
-            spot_pair = self._get_spot_pair(coin_name)
-            spot_side_is_buy = (side == 'opening')
-            perp_side_is_buy = (side == 'closing')
-
-            spot_order_result = self.exchange.order(spot_pair, spot_side_is_buy, spot_size, spot_price, order_params)
-            perp_order_result = self.exchange.order(coin_name, perp_side_is_buy, perp_size, perp_price, order_params)
-            
-            self._log_order_submission(coin_name, 'spot', 'buy' if spot_side_is_buy else 'sell', spot_size, spot_price, spot_order_result, f"{side}_{order_type}")
-            self._log_order_submission(coin_name, 'perp', 'buy' if perp_side_is_buy else 'sell', perp_size, perp_price, perp_order_result, f"{side}_{order_type}")
-
-            spot_info = self._get_order_status(spot_order_result)
-            perp_info = self._get_order_status(perp_order_result)
-            spot_info['side'] = 'buy' if spot_side_is_buy else 'sell'
-            perp_info['side'] = 'buy' if perp_side_is_buy else 'sell'
-
-            return spot_info, perp_info, spot_size, perp_size
-        except Exception as e:
-            logger.error(f"在 _attempt_order_placement 中發生錯誤: {e}", exc_info=True)
-            return None, None, None, None
-
-    async def _execute_hybrid_strategy(self, coin_name: str, side: str):
-        """Executes the full hybrid maker-taker strategy for opening or closing a position."""
-        # --- 1. Maker Attempt ---
-        logger.info(f"階段 1: 嘗試以 Maker 方式 {side} {coin_name} 部位...")
-        spot_info, perp_info, spot_size, perp_size = await self._attempt_order_placement(coin_name, side, 'maker')
-
         if spot_info and perp_info and spot_info["status"] == 'ok' and perp_info["status"] == 'ok':
             logger.info(f"Maker 訂單提交成功 (現貨: {spot_info['state']}, 合約: {perp_info['state']})。")
             pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=(side == 'closing'))
@@ -724,6 +759,15 @@ class Delta:
             pending_order.spot_filled = spot_info['state'] == 'filled'
             pending_order.perp_filled = perp_info['state'] == 'filled'
             
+            if pending_order.spot_filled and pending_order.perp_filled:
+                await self._finalize_successful_execution(
+                    coin_name,
+                    pending_order.spot_oid,
+                    pending_order.perp_oid,
+                    operation_type,
+                )
+                return True
+
             if not (pending_order.spot_filled and pending_order.perp_filled):
                 MAKER_WAIT_SECONDS = 5
                 logger.info(f"等待 {MAKER_WAIT_SECONDS} 秒觀察 Maker 訂單成交情況...")
@@ -738,14 +782,16 @@ class Delta:
                     logger.info("Maker 訂單在等待期間完全成交！")
                     pending_order.spot_filled = True
                     pending_order.perp_filled = True
-                    self.pending_orders.append(pending_order)
+                    await self._finalize_successful_execution(
+                        coin_name,
+                        pending_order.spot_oid,
+                        pending_order.perp_oid,
+                        operation_type,
+                    )
                     return True
                 else:
                     logger.warning("Maker 訂單未在時限內完全成交，取消並轉為 Taker 策略。")
                     await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
-            else:
-                self.pending_orders.append(pending_order)
-                return True
         else:
             await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
 
@@ -753,8 +799,18 @@ class Delta:
         logger.info(f"階段 2: 嘗試以 Taker 方式 {side} {coin_name} 部位...")
         spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker = await self._attempt_order_placement(coin_name, side, 'taker')
 
+        if not all([spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker]):
+            logger.info(f"{coin_name} 的 {operation_type} Taker 嘗試因資金或掛單限制未能建立有效規模。")
+            return False
+
         if spot_info_taker and perp_info_taker and spot_info_taker["state"] == 'filled' and perp_info_taker["state"] == 'filled':
             logger.info("Taker 方式成功，兩邊均已立即成交。")
+            await self._finalize_successful_execution(
+                coin_name,
+                spot_info_taker.get('oid') if isinstance(spot_info_taker, dict) else None,
+                perp_info_taker.get('oid') if isinstance(perp_info_taker, dict) else None,
+                operation_type,
+            )
             return True
         else:
             logger.error("Taker 方式失敗，執行緊急回滾。")
@@ -768,6 +824,22 @@ class Delta:
         if self.has_delta_neutral_position(coin_name)[0]:
             logger.info(f"已持有 {coin_name} 的 Delta 中性部位，無需重複建立。")
             return True
+
+        available_usdc = self._get_spot_account_USDC()
+        min_balance_threshold = getattr(self, "min_spot_balance_to_open", 50.0)
+        if available_usdc <= min_balance_threshold:
+            logger.info(
+                f"現貨 USDC 餘額 (${available_usdc:.2f}) 低於設定的開倉閾值 (${min_balance_threshold:.2f})，跳過建立 {coin_name} 部位。"
+            )
+            return False
+
+        target_perp_leverage = getattr(self, "target_perp_leverage", 1.0)
+        max_notional_allowed = self.perp_user_state * target_perp_leverage if self.perp_user_state else 0
+        if max_notional_allowed <= 0:
+            logger.info(
+                f"永續帳戶價值不足（{self.perp_user_state:.2f}），無法在 {coin_name} 建立新部位。"
+            )
+            return False
         
         return await self._execute_hybrid_strategy(coin_name, 'opening')
     
@@ -794,6 +866,12 @@ class Delta:
             await self._update_order_fill_status(pending_order)
             if pending_order.spot_filled and pending_order.perp_filled:
                 logger.info(f"{pending_order.coin_name} 的兩筆 {operation_type} 訂單皆已成交。部位建立完成。")
+                await self._finalize_successful_execution(
+                    pending_order.coin_name,
+                    pending_order.spot_oid,
+                    pending_order.perp_oid,
+                    'closing' if pending_order.is_closing_position else 'opening',
+                )
                 orders_to_remove.append(pending_order)
                 continue
 
@@ -1530,6 +1608,7 @@ async def main():
     delta = None
     try:
         delta = Delta("config.json")
+        await delta.initialize()
         setup_signal_handlers(delta)
         await delta.start()
     except KeyboardInterrupt:

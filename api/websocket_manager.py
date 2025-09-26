@@ -33,9 +33,11 @@ manager = ConnectionManager()
 
 class WebSocketLogHandler(logging.Handler):
     """A custom logging handler that broadcasts log records to WebSockets."""
-    def __init__(self, manager_instance: ConnectionManager):
+
+    def __init__(self, manager_instance: ConnectionManager, loop: asyncio.AbstractEventLoop | None = None):
         super().__init__()
         self.manager = manager_instance
+        self.loop = loop
         # Regex to strip ANSI escape codes
         self.ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
@@ -43,7 +45,26 @@ class WebSocketLogHandler(logging.Handler):
         """Emit a log record."""
         try:
             msg = self.format(record)
-            # Use asyncio.create_task to send the message without blocking the logger
-            asyncio.create_task(self.manager.broadcast(msg))
+
+            loop = self.loop
+            if loop is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+            if loop and loop.is_running():
+                try:
+                    # If we're in the same event loop thread, use create_task
+                    if asyncio.get_running_loop() is loop:
+                        asyncio.create_task(self.manager.broadcast(msg))
+                    else:
+                        asyncio.run_coroutine_threadsafe(self.manager.broadcast(msg), loop)
+                except RuntimeError:
+                    # No running loop in this thread; fall back to thread-safe scheduling
+                    asyncio.run_coroutine_threadsafe(self.manager.broadcast(msg), loop)
+            else:
+                # As a last resort, run the coroutine synchronously
+                asyncio.run(self.manager.broadcast(msg))
         except Exception:
             self.handleError(record)

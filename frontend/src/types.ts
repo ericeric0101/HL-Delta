@@ -1,8 +1,11 @@
 export interface AccountInfo {
   address: string;
   total_value: number;
+  spot_value?: number | null;
+  perp_value?: number | null;
   margin_used: number | null;
   total_raw_usd: number | null;
+  margin_account_value?: number | null;
 }
 
 export interface Position {

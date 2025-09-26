@@ -150,6 +150,19 @@ class Delta:
                             deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
                             tick_size=0.1
                         )
+                    elif coin_name == "SOL" and spot_coin["name"] == "USOL":
+                        self.coins[coin_name].spot = SpotMarket(
+                            name=spot_coin["name"],
+                            token_id=spot_coin["tokenId"],
+                            index=spot_coin["index"],
+                            sz_decimals=spot_coin["szDecimals"],
+                            wei_decimals=spot_coin["weiDecimals"],
+                            is_canonical=spot_coin["isCanonical"],
+                            full_name=spot_coin["fullName"],
+                            evm_contract=spot_coin.get("evmContract"),
+                            deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
+                            tick_size=0.001 # Assuming a tick size for SOL, can be adjusted
+                        )
                     elif coin_name == spot_coin["name"]:
                         self.coins[coin_name].spot = SpotMarket(
                             name=spot_coin["name"],
@@ -395,7 +408,7 @@ class Delta:
             
         rounded_size = self.round_size(coin_name, True, size)
         
-        logger.info(f"計算 {coin_name} 的最佳現貨規模: {size:.6f} -> 四捨五入至 {rounded_size} (基於總 USDC 餘額 ${total_usdc_balance:.2f})")
+        logger.info(f"計算 {coin_name} 的最佳現貨規模: {size:.6f} -> 四捨五入至 {rounded_size} (基於現貨 USDC 餘額 ${available_usdc:.2f})")
         
         return rounded_size
     
@@ -481,164 +494,282 @@ class Delta:
                     best_coin = coin_name
         return best_coin
     
-    def _extract_and_track_order_ids(self, pending_order, spot_order_result, perp_order_result, coin_name, operation_type=""):
-        """從訂單回應中提取訂單 ID 並追蹤其狀態。"""
-        spot_success = False
-        perp_success = False
-
-        # 處理現貨訂單回應
-        if spot_order_result and spot_order_result.get('status') == 'ok':
-            response_data = spot_order_result.get('response', {}).get('data', {})
-            status = response_data.get('statuses', [{}])[0]
-            if 'resting' in status:
-                pending_order.spot_oid = int(status['resting']['oid'])
-                logger.info(f"已成功提交 {coin_name} 的現貨 {operation_type} 訂單，訂單 ID: {pending_order.spot_oid}")
-                spot_success = True
-            elif 'filled' in status:
-                pending_order.spot_oid = int(status['filled']['oid'])
-                pending_order.spot_filled = True
-                logger.info(f"{coin_name} 的現貨 {operation_type} 訂單已立即成交，訂單 ID: {pending_order.spot_oid}")
-                spot_success = True
-            elif 'error' in status:
-                logger.warning(f"提交 {coin_name} 的現貨 {operation_type} 訂單失敗: {status['error']}")
-            else:
-                logger.warning(f"提交 {coin_name} 的現貨 {operation_type} 訂單時收到未知的回應: {spot_order_result}")
-
-        # 處理永續合約訂單回應
-        if perp_order_result and perp_order_result.get('status') == 'ok':
-            response_data = perp_order_result.get('response', {}).get('data', {})
-            status = response_data.get('statuses', [{}])[0]
-            if 'resting' in status:
-                pending_order.perp_oid = int(status['resting']['oid'])
-                logger.info(f"已成功提交 {coin_name} 的永續合約 {operation_type} 訂單，訂單 ID: {pending_order.perp_oid}")
-                perp_success = True
-            elif 'filled' in status:
-                pending_order.perp_oid = int(status['filled']['oid'])
-                pending_order.perp_filled = True
-                logger.info(f"{coin_name} 的永續合約 {operation_type} 訂單已立即成交，訂單 ID: {pending_order.perp_oid}")
-                perp_success = True
-            elif 'error' in status:
-                logger.warning(f"提交 {coin_name} 的永續合約 {operation_type} 訂單失敗: {status['error']}")
-            else:
-                logger.warning(f"提交 {coin_name} 的永續合約 {operation_type} 訂單時收到未知的回應: {perp_order_result}")
-
-        # 決定是否需要追蹤這些訂單
-        if pending_order.spot_oid or pending_order.perp_oid:
-            if not pending_order.spot_filled or not pending_order.perp_filled:
-                self.pending_orders.append(pending_order)
-                logger.info(f"已將 {coin_name} 的待處理 {operation_type} 部位加入追蹤列表。")
-            return True
-        
-        # 如果兩邊都提交失敗，則返回 False
-        if not spot_success and not perp_success:
-            logger.error(f"為 {coin_name} 建立 {operation_type} 部位的兩邊訂單均提交失敗。")
-            return False
-            
-        return True
-    
-    async def create_delta_position(self, coin_name):
-        if coin_name not in self.coins:
-            logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
-            return False
-        
-        coin_info = self.coins[coin_name]
-        
-        if not (coin_info.perp and coin_info.spot):
-            logger.warning(f"{coin_name} 沒有同時擁有永續合約和現貨市場")
-            return False
-        
-        # Check if we already have a delta-neutral position for this coin
-        is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
-        if is_delta_neutral:
-            logger.info(f"已持有 {coin_name} 的 Delta 中性部位 - 永續合約: {perp_size}, 現貨: {spot_size}")
-            return True
+    def _get_order_status(self, order_result: dict) -> dict:
+        """Parses an order result to get a standardized status object."""
+        if not order_result or order_result.get('status') != 'ok':
+            error_msg = order_result.get('response', 'No response')
+            return {"status": "error", "state": "failed_submission", "oid": None, "error_message": f"Submission failed: {error_msg}"}
         
         try:
-            # Get L2 book data to find best bid and ask
+            status_info = order_result['response']['data']['statuses'][0]
+            if 'resting' in status_info:
+                return {"status": "ok", "state": "resting", "oid": int(status_info['resting']['oid']), "error_message": None}
+            elif 'filled' in status_info:
+                return {"status": "ok", "state": "filled", "oid": int(status_info['filled']['oid']), "error_message": None}
+            elif 'error' in status_info:
+                return {"status": "error", "state": "error_response", "oid": None, "error_message": status_info['error']}
+            else:
+                return {"status": "error", "state": "unknown", "oid": None, "error_message": "Unknown order status response"}
+        except (KeyError, IndexError) as e:
+            return {"status": "error", "state": "parsing_error", "oid": None, "error_message": f"Failed to parse order response: {e}"}
+
+    async def _rollback_position(self, coin_name: str, spot_info: dict, perp_info: dict, spot_size: float, perp_size: float):
+        """Rollback logic to cancel resting orders or market-close filled orders."""
+        logger.warning("開倉/平倉不完全成功，啟動回滾程序...")
+        spot_pair = self._get_spot_pair(coin_name)
+
+        if spot_info and spot_info["status"] == 'ok':
+            if spot_info['state'] == 'resting':
+                logger.info(f"正在取消未成交的現貨訂單 {spot_info['oid']}...")
+                self.exchange.cancel(spot_pair, spot_info['oid'])
+            elif spot_info['state'] == 'filled':
+                logger.critical(f"現貨訂單 {spot_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
+                side_to_rollback = not (spot_info.get('side') == 'buy')
+                self.exchange.order(spot_pair, side_to_rollback, spot_size, 0, {"market": True})
+
+        if perp_info and perp_info["status"] == 'ok':
+            if perp_info['state'] == 'resting':
+                logger.info(f"正在取消未成交的合約訂單 {perp_info['oid']}...")
+                self.exchange.cancel(coin_name, perp_info['oid'])
+            elif perp_info['state'] == 'filled':
+                logger.critical(f"合約訂單 {perp_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
+                side_to_rollback = not (perp_info.get('side') == 'buy')
+                self.exchange.order(coin_name, side_to_rollback, perp_size, 0, {"market": True})
+
+    async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:
+        """Attempts to place orders based on side (opening/closing) and type (maker/taker)."""
+        try:
             l2_book = self.info.l2_snapshot(coin_name)
             if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
-                logger.error(f"無法取得 {coin_name} 的 L2 訂單簿")
-                return False
-            
+                logger.warning(f"無法取得 {coin_name} 的 L2 訂單簿。")
+                return None, None, None, None
+
             best_bid = float(l2_book["levels"][0][0]['px'])
             best_ask = float(l2_book["levels"][1][0]['px'])
 
-            # Check for a reasonable spread to avoid placing bad orders
-            spread = (best_ask - best_bid) / best_ask
-            if spread > 0.01: # If spread is > 1%, it might be too risky
-                 logger.warning(f"{coin_name} 的價差過大 ({spread:.2%})，跳過下單。")
-                 return False
+            if order_type == 'maker':
+                spot_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
+                perp_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
+                order_params = {"limit": {"tif": "Alo"}}
+            else: # taker
+                spot_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
+                perp_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
+                order_params = {"limit": {"tif": "Ioc"}} # Immediate Or Cancel
 
-            price = (best_bid + best_ask) / 2
-            if price <= 0:
-                logger.error(f"{coin_name} 的價格無效: {price}")
-                return False
+            if side == 'opening':
+                spot_size = self._calculate_optimal_spot_size(coin_name)
+                if spot_size <= 0: return None, None, None, None
+                perp_size = spot_size
+            else: # closing
+                _, perp_size_val, spot_size_val, _ = self.has_delta_neutral_position(coin_name)
+                spot_size = spot_size_val
+                perp_size = abs(perp_size_val)
+
+            spot_pair = self._get_spot_pair(coin_name)
+            spot_side_is_buy = (side == 'opening')
+            perp_side_is_buy = (side == 'closing')
+
+            spot_order_result = self.exchange.order(spot_pair, spot_side_is_buy, spot_size, spot_price, order_params)
+            perp_order_result = self.exchange.order(coin_name, perp_side_is_buy, perp_size, perp_price, order_params)
             
-            # Get optimal sizes for spot and perp
-            spot_size = self._calculate_optimal_spot_size(coin_name)
-            if spot_size <= 0:
-                logger.error(f"計算出的 {coin_name} 現貨規模非正數: {spot_size}")
-                return False
-                
-            perp_size = spot_size  # For delta-neutral, perp size equals spot size
-            
-            # Validate the sizes after rounding
-            if spot_size <= 0 or perp_size <= 0:
-                logger.error(f"四捨五入後 {coin_name} 的部位規模無效: 現貨={spot_size}, 永續合約={perp_size}")
-                return False
-            
-            # Calculate minimum size based on $10 value
-            min_size_value = 10 / price
-            if spot_size < min_size_value:
-                logger.warning(f"計算出的 {coin_name} 部位規模太小: {spot_size} < {min_size_value}")
-                logger.warning(f"當前價格: ${price}, 最小部位價值: $10")
-                return False
-                
-            # Ensure we have enough USDC for this purchase
-            required_usdc = spot_size * price
-            available_usdc = self._get_spot_account_USDC()
-            if required_usdc > available_usdc:  # The 0.95 buffer is already in the size calculation
-                logger.warning(f"建立 {coin_name} 部位所需 USDC 不足: 需要 ${required_usdc:.2f}, 現有 ${available_usdc:.2f}")
-                return False
-                
-            # Set limit prices to be a maker
-            spot_limit_price = self.round_price(coin_name, best_bid)
-            perp_limit_price = self.round_price(coin_name, best_ask)
-                
-            # Create a new pending order to track
-            pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=False)
-            spot_order_result = None
-            perp_order_result = None
-                
-            logger.info(f"正在建立 {coin_name} 的現貨限價買單: {spot_size} @ {spot_limit_price} (僅掛單)")
-            if coin_name == "BTC":
-                spot_name = "UBTC"
-            elif coin_name == "ETH":
-                spot_name = "UETH"
-            else:
-                spot_name = coin_name
-                
-            spot_pair = f"{spot_name}/USDC"
-            
-            spot_order_result = self.exchange.order(spot_pair, True, spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
-            self._log_order_submission(coin_name, 'spot', 'buy', spot_size, spot_limit_price, spot_order_result, 'opening')
-            
-            logger.info(f"正在建立 {coin_name} 的永續合約限價空單: {perp_size} @ {perp_limit_price} (僅掛單)")
-            perp_order_result = self.exchange.order(coin_name, False, perp_size, perp_limit_price, {"limit": {"tif": "Alo"}})
-            self._log_order_submission(coin_name, 'perp', 'sell', perp_size, perp_limit_price, perp_order_result, 'opening')
-            
-            # Use the shared helper method to track orders
-            return self._extract_and_track_order_ids(
-                pending_order, 
-                spot_order_result, 
-                perp_order_result, 
-                coin_name, 
-                "opening"
-            )
-            
+            self._log_order_submission(coin_name, 'spot', 'buy' if spot_side_is_buy else 'sell', spot_size, spot_price, spot_order_result, f"{side}_{order_type}")
+            self._log_order_submission(coin_name, 'perp', 'buy' if perp_side_is_buy else 'sell', perp_size, perp_price, perp_order_result, f"{side}_{order_type}")
+
+            spot_info = self._get_order_status(spot_order_result)
+            perp_info = self._get_order_status(perp_order_result)
+            spot_info['side'] = 'buy' if spot_side_is_buy else 'sell'
+            perp_info['side'] = 'buy' if perp_side_is_buy else 'sell'
+
+            return spot_info, perp_info, spot_size, perp_size
         except Exception as e:
-            logger.error(f"建立 {coin_name} 的 Delta 中性部位時發生錯誤: {e}")
+            logger.error(f"在 _attempt_order_placement 中發生錯誤: {e}", exc_info=True)
+            return None, None, None, None
+
+    async def _execute_hybrid_strategy(self, coin_name: str, side: str):
+        """Executes the full hybrid maker-taker strategy for opening or closing a position."""
+        # --- 1. Maker Attempt ---
+        logger.info(f"階段 1: 嘗試以 Maker 方式 {side} {coin_name} 部位...")
+        spot_info, perp_info, spot_size, perp_size = await self._attempt_order_placement(coin_name, side, 'maker')
+
+        if spot_info and perp_info and spot_info["status"] == 'ok' and perp_info["status"] == 'ok':
+            logger.info(f"Maker 訂單提交成功 (現貨: {spot_info['state']}, 合約: {perp_info['state']})。")
+            pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=(side == 'closing'))
+            pending_order.spot_oid = spot_info['oid']
+            pending_order.perp_oid = perp_info['oid']
+            pending_order.spot_filled = spot_info['state'] == 'filled'
+            pending_order.perp_filled = perp_info['state'] == 'filled'
+            
+            if not (pending_order.spot_filled and pending_order.perp_filled):
+                MAKER_WAIT_SECONDS = 5
+                logger.info(f"等待 {MAKER_WAIT_SECONDS} 秒觀察 Maker 訂單成交情況...")
+                await asyncio.sleep(MAKER_WAIT_SECONDS)
+
+                spot_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.spot_oid)
+                perp_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.perp_oid)
+                spot_filled_after_wait = spot_status_after_wait.get('order', {}).get('status') != 'open'
+                perp_filled_after_wait = perp_status_after_wait.get('order', {}).get('status') != 'open'
+
+                if spot_filled_after_wait and perp_filled_after_wait:
+                    logger.info("Maker 訂單在等待期間完全成交！")
+                    pending_order.spot_filled = True
+                    pending_order.perp_filled = True
+                    self.pending_orders.append(pending_order)
+                    return True
+                else:
+                    logger.warning("Maker 訂單未在時限內完全成交，取消並轉為 Taker 策略。")
+                    await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
+            else:
+                self.pending_orders.append(pending_order)
+                return True
+        else:
+            await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
+
+        # --- 2. Taker Attempt ---
+        logger.info(f"階段 2: 嘗試以 Taker 方式 {side} {coin_name} 部位...")
+        spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker = await self._attempt_order_placement(coin_name, side, 'taker')
+
+        if spot_info_taker and perp_info_taker and spot_info_taker["state"] == 'filled' and perp_info_taker["state"] == 'filled':
+            logger.info("Taker 方式成功，兩邊均已立即成交。")
+            return True
+        else:
+            logger.error("Taker 方式失敗，執行緊急回滾。")
+            await self._rollback_position(coin_name, spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker)
             return False
+
+
+
+    async def _rollback_position(self, coin_name: str, spot_info: dict, perp_info: dict, spot_size: float, perp_size: float):
+        """Rollback logic to cancel resting orders or market-close filled orders."""
+        logger.warning("開倉/平倉不完全成功，啟動回滾程序...")
+        spot_pair = self._get_spot_pair(coin_name)
+
+        if spot_info and spot_info["status"] == 'ok':
+            if spot_info['state'] == 'resting':
+                logger.info(f"正在取消未成交的現貨訂單 {spot_info['oid']}...")
+                self.exchange.cancel(spot_pair, spot_info['oid'])
+            elif spot_info['state'] == 'filled':
+                logger.critical(f"現貨訂單 {spot_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
+                side_to_rollback = not (spot_info.get('side') == 'buy')
+                self.exchange.order(spot_pair, side_to_rollback, spot_size, 0, {"market": True})
+
+        if perp_info and perp_info["status"] == 'ok':
+            if perp_info['state'] == 'resting':
+                logger.info(f"正在取消未成交的合約訂單 {perp_info['oid']}...")
+                self.exchange.cancel(coin_name, perp_info['oid'])
+            elif perp_info['state'] == 'filled':
+                logger.critical(f"合約訂單 {perp_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
+                side_to_rollback = not (perp_info.get('side') == 'buy')
+                self.exchange.order(coin_name, side_to_rollback, perp_size, 0, {"market": True})
+
+    async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:
+        """Attempts to place orders based on side (opening/closing) and type (maker/taker)."""
+        try:
+            l2_book = self.info.l2_snapshot(coin_name)
+            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
+                logger.warning(f"無法取得 {coin_name} 的 L2 訂單簿。")
+                return None, None, None, None
+
+            best_bid = float(l2_book["levels"][0][0]['px'])
+            best_ask = float(l2_book["levels"][1][0]['px'])
+
+            if order_type == 'maker':
+                spot_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
+                perp_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
+                order_params = {"limit": {"tif": "Alo"}}
+            else: # taker
+                spot_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
+                perp_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
+                order_params = {"limit": {"tif": "Ioc"}} # Immediate Or Cancel
+
+            if side == 'opening':
+                spot_size = self._calculate_optimal_spot_size(coin_name)
+                if spot_size <= 0: return None, None, None, None
+                perp_size = spot_size
+            else: # closing
+                _, perp_size_val, spot_size_val, _ = self.has_delta_neutral_position(coin_name)
+                spot_size = spot_size_val
+                perp_size = abs(perp_size_val)
+
+            spot_pair = self._get_spot_pair(coin_name)
+            spot_side_is_buy = (side == 'opening')
+            perp_side_is_buy = (side == 'closing')
+
+            spot_order_result = self.exchange.order(spot_pair, spot_side_is_buy, spot_size, spot_price, order_params)
+            perp_order_result = self.exchange.order(coin_name, perp_side_is_buy, perp_size, perp_price, order_params)
+            
+            self._log_order_submission(coin_name, 'spot', 'buy' if spot_side_is_buy else 'sell', spot_size, spot_price, spot_order_result, f"{side}_{order_type}")
+            self._log_order_submission(coin_name, 'perp', 'buy' if perp_side_is_buy else 'sell', perp_size, perp_price, perp_order_result, f"{side}_{order_type}")
+
+            spot_info = self._get_order_status(spot_order_result)
+            perp_info = self._get_order_status(perp_order_result)
+            spot_info['side'] = 'buy' if spot_side_is_buy else 'sell'
+            perp_info['side'] = 'buy' if perp_side_is_buy else 'sell'
+
+            return spot_info, perp_info, spot_size, perp_size
+        except Exception as e:
+            logger.error(f"在 _attempt_order_placement 中發生錯誤: {e}", exc_info=True)
+            return None, None, None, None
+
+    async def _execute_hybrid_strategy(self, coin_name: str, side: str):
+        """Executes the full hybrid maker-taker strategy for opening or closing a position."""
+        # --- 1. Maker Attempt ---
+        logger.info(f"階段 1: 嘗試以 Maker 方式 {side} {coin_name} 部位...")
+        spot_info, perp_info, spot_size, perp_size = await self._attempt_order_placement(coin_name, side, 'maker')
+
+        if spot_info and perp_info and spot_info["status"] == 'ok' and perp_info["status"] == 'ok':
+            logger.info(f"Maker 訂單提交成功 (現貨: {spot_info['state']}, 合約: {perp_info['state']})。")
+            pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=(side == 'closing'))
+            pending_order.spot_oid = spot_info['oid']
+            pending_order.perp_oid = perp_info['oid']
+            pending_order.spot_filled = spot_info['state'] == 'filled'
+            pending_order.perp_filled = perp_info['state'] == 'filled'
+            
+            if not (pending_order.spot_filled and pending_order.perp_filled):
+                MAKER_WAIT_SECONDS = 5
+                logger.info(f"等待 {MAKER_WAIT_SECONDS} 秒觀察 Maker 訂單成交情況...")
+                await asyncio.sleep(MAKER_WAIT_SECONDS)
+
+                spot_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.spot_oid)
+                perp_status_after_wait = self.info.query_order_by_oid(self.address, pending_order.perp_oid)
+                spot_filled_after_wait = spot_status_after_wait.get('order', {}).get('status') != 'open'
+                perp_filled_after_wait = perp_status_after_wait.get('order', {}).get('status') != 'open'
+
+                if spot_filled_after_wait and perp_filled_after_wait:
+                    logger.info("Maker 訂單在等待期間完全成交！")
+                    pending_order.spot_filled = True
+                    pending_order.perp_filled = True
+                    self.pending_orders.append(pending_order)
+                    return True
+                else:
+                    logger.warning("Maker 訂單未在時限內完全成交，取消並轉為 Taker 策略。")
+                    await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
+            else:
+                self.pending_orders.append(pending_order)
+                return True
+        else:
+            await self._rollback_position(coin_name, spot_info, perp_info, spot_size, perp_size)
+
+        # --- 2. Taker Attempt ---
+        logger.info(f"階段 2: 嘗試以 Taker 方式 {side} {coin_name} 部位...")
+        spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker = await self._attempt_order_placement(coin_name, side, 'taker')
+
+        if spot_info_taker and perp_info_taker and spot_info_taker["state"] == 'filled' and perp_info_taker["state"] == 'filled':
+            logger.info("Taker 方式成功，兩邊均已立即成交。")
+            return True
+        else:
+            logger.error("Taker 方式失敗，執行緊急回滾。")
+            await self._rollback_position(coin_name, spot_info_taker, perp_info_taker, spot_size_taker, perp_size_taker)
+            return False
+
+    async def create_delta_position(self, coin_name):
+        if coin_name not in self.coins or not self.coins[coin_name].spot or not self.coins[coin_name].perp:
+            logger.warning(f"{coin_name} 市場不完整，無法建立部位。")
+            return False
+        if self.has_delta_neutral_position(coin_name)[0]:
+            logger.info(f"已持有 {coin_name} 的 Delta 中性部位，無需重複建立。")
+            return True
+        
+        return await self._execute_hybrid_strategy(coin_name, 'opening')
     
     async def check_pending_orders(self):
         """Check the status of all pending orders and handle accordingly."""
@@ -796,103 +927,12 @@ class Delta:
         except Exception as e:
             logger.error(f"重新掛單 {coin_name} 的訂單時發生錯誤: {e}")
     
-    def close_delta_position(self, coin_name):
-        if coin_name not in self.coins:
-            logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
+    async def close_delta_position(self, coin_name):
+        if not self.has_delta_neutral_position(coin_name)[0]:
+            logger.warning(f"沒有 {coin_name} 的 Delta 中性部位可供關閉")
             return False
         
-        coin_info = self.coins[coin_name]
-        
-        if not (coin_info.perp and coin_info.spot):
-            logger.warning(f"{coin_name} 沒有同時擁有永續合約和現貨市場")
-            return False
-        
-        try:
-            # Check if we have positions to close
-            is_delta_neutral, perp_size, spot_size, _ = self.has_delta_neutral_position(coin_name)
-            
-            if not is_delta_neutral:
-                logger.warning(f"沒有 {coin_name} 的 Delta 中性部位可供關閉")
-                return False
-            
-            # Get L2 book data to find best bid and ask
-            l2_book = self.info.l2_snapshot(coin_name)
-            if not l2_book or not l2_book["levels"][0] or not l2_book["levels"][1]:
-                logger.error(f"無法取得 {coin_name} 的 L2 訂單簿")
-                return False
-            
-            best_bid = float(l2_book["levels"][0][0]['px'])
-            best_ask = float(l2_book["levels"][1][0]['px'])
-
-            # Check for a reasonable spread
-            spread = (best_ask - best_bid) / best_ask
-            if spread > 0.01: # If spread is > 1%, it might be too risky
-                 logger.warning(f"{coin_name} 的價差過大 ({spread:.2%})，跳過下單。")
-                 return False
-
-            # For closing, we reverse the orders:
-            # - Sell the spot position at the best ask
-            # - Buy back (cover) the short perp position at the best bid
-            spot_limit_price = self.round_price(coin_name, best_ask)
-            perp_limit_price = self.round_price(coin_name, best_bid)
-            
-            # Create a new pending order to track
-            pending_order = PendingDeltaOrder(coin_name=coin_name, is_closing_position=True)
-            spot_order_result = None
-            perp_order_result = None
-            
-            # For spot, we need to sell what we have
-            if spot_size > 0:
-                # Get actual available balance (total minus any amount on hold)
-                available_spot_size = spot_size
-                if coin_info.spot.position and "hold" in coin_info.spot.position:
-                    available_spot_size = spot_size - coin_info.spot.position["hold"]
-                
-                # Ensure positive size and proper rounding
-                if available_spot_size <= 0:
-                    logger.warning(f"{coin_name} 沒有可用的餘額 - 總計: {spot_size}, 凍結: {coin_info.spot.position.get('hold', 0)}")
-                    return False
-                
-                # Round to the proper number of decimals for this spot market
-                rounded_spot_size = self.round_size(coin_name, True, available_spot_size)
-                
-                logger.info(f"正在建立 {coin_name} 的現貨限價賣單: {rounded_spot_size} @ {spot_limit_price} (僅掛單)")
-                
-                if coin_name == "BTC":
-                    spot_name = "UBTC"
-                elif coin_name == "ETH":
-                    spot_name = "UETH"
-                else:
-                    spot_name = coin_name
-                    
-                spot_pair = f"{spot_name}/USDC"
-                
-                # For sell orders, side is False (sell)
-                spot_order_result = self.exchange.order(spot_pair, False, rounded_spot_size, spot_limit_price, {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'spot', 'sell', rounded_spot_size, spot_limit_price, spot_order_result, 'closing')
-            
-            # For perp, we need to buy back our short position
-            if perp_size < 0:
-                # Convert negative size to positive for buy order
-                buy_size = abs(perp_size)
-                logger.info(f"正在建立 {coin_name} 的永續合約限價買單以平倉: {buy_size} @ {perp_limit_price} (僅掛單)")
-                
-                # For buy orders, side is True (buy)
-                perp_order_result = self.exchange.order(coin_name, True, buy_size, perp_limit_price, {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'perp', 'buy', buy_size, perp_limit_price, perp_order_result, 'closing')
-            
-            # Use the shared helper method to track orders
-            return self._extract_and_track_order_ids(
-                pending_order, 
-                spot_order_result, 
-                perp_order_result, 
-                coin_name, 
-                "closing"
-            )
-            
-        except Exception as e:
-            logger.error(f"關閉 {coin_name} 的 Delta 中性部位時發生錯誤: {e}")
-            return False
+        return await self._execute_hybrid_strategy(coin_name, 'closing')
     
     async def close_all_delta_positions(self):
         """Close all active delta-neutral positions across all tracked coins."""
@@ -906,7 +946,7 @@ class Delta:
             is_delta_neutral, _, _, _ = self.has_delta_neutral_position(coin_name)
             if is_delta_neutral:
                 logger.info(f"正在關閉 {coin_name} 的 Delta 中性部位...")
-                result = self.close_delta_position(coin_name)
+                result = await self.close_delta_position(coin_name)
                 if result:
                     logger.info(f"成功關閉 {coin_name} 的 Delta 中性部位")
                     closed_positions += 1
@@ -1312,7 +1352,7 @@ class Delta:
                 
                 # Close current position and open new one
                 logger.info(f"{Colors.YELLOW}正在關閉 {current_position_coin} 的當前部位...{Colors.RESET}")
-                close_result = self.close_delta_position(current_position_coin)
+                close_result = await self.close_delta_position(current_position_coin)
                 
                 if close_result:
                     logger.info(f"{Colors.GREEN}已成功啟動關閉 {current_position_coin} 部位的程序{Colors.RESET}")

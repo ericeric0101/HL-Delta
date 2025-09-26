@@ -2,15 +2,18 @@ import React from 'react';
 import {
   Paper,
   Typography,
+  Box,
   Chip,
   CircularProgress,
   Alert,
   Button,
   Stack,
   Grid,
+  IconButton,
 } from '@mui/material';
 import PowerSettingsNewIcon from '@mui/icons-material/PowerSettingsNew';
 import PlayCircleOutlineIcon from '@mui/icons-material/PlayCircleOutline';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { BotStatus } from '../types';
 import apiClient from '../api/client';
 
@@ -89,9 +92,14 @@ const StatusOverview: React.FC<Props> = ({ status, error, loading, refresh }) =>
       {/* 下排：Bot Controls 獨占一整行（xs/md 12） */}
       <Grid size={{ xs: 12 }}>
         <Paper sx={{ p: 2.5, borderRadius: 1 }}>
-          <Typography variant="subtitle2" color="text.secondary" gutterBottom>
-            Bot 控制
-          </Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+                    Bot 控制
+                </Typography>
+                <IconButton onClick={refresh} disabled={loading} aria-label="refresh status">
+                    <RefreshIcon />
+                </IconButton>
+            </Box>
 
           {/* 水平排列；空間不夠自動換行，不會擠在一起 */}
           <Stack

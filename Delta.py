@@ -369,13 +369,12 @@ class Delta:
             logger.error(f"無法為 {coin_name} 取得有效價格以計算規模。")
             return 0
 
-        # Use the total available USDC across all accounts as the basis for our position size
-        total_usdc_balance = self._get_total_usdc_balance()
+        # Use the available USDC in the spot account as the basis for our position size.
+        available_usdc = self._get_spot_account_USDC()
         
-        # We aim to use a significant portion of our total capital for the delta-neutral position.
-        # Let's use 95% of our total USDC to open the position, which will be split between spot buy and perp margin.
-        # The spot leg will consume the majority of this capital.
-        capital_for_position = total_usdc_balance * 0.95
+        # We aim to use a significant portion of our spot capital for the delta-neutral position.
+        # Let's use 95% of our spot USDC to open the position.
+        capital_for_position = available_usdc * 0.95
         
         if capital_for_position < 10:
             logger.warning(f"總可用於部位的資金不足: ${capital_for_position:.2f}")
@@ -598,7 +597,7 @@ class Delta:
             # Ensure we have enough USDC for this purchase
             required_usdc = spot_size * price
             available_usdc = self._get_spot_account_USDC()
-            if required_usdc > available_usdc * 0.95:  # Leave 5% buffer
+            if required_usdc > available_usdc:  # The 0.95 buffer is already in the size calculation
                 logger.warning(f"建立 {coin_name} 部位所需 USDC 不足: 需要 ${required_usdc:.2f}, 現有 ${available_usdc:.2f}")
                 return False
                 

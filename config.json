@@ -12,8 +12,8 @@
   },
   "trading": {
     "refresh_interval_sec": 60,
-    "min_spot_balance_to_open": 50,
-    "target_perp_leverage": 1.0
+    "min_spot_balance_to_open": 1,
+    "target_perp_leverage": 2.0
   },
   "api": {
     "host": "0.0.0.0",

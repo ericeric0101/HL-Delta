@@ -59,6 +59,7 @@ async def get_status():
                     "position_value": perp_position.get("position_value", 0),
                     "unrealized_pnl": perp_position.get("unrealized_pnl", 0),
                     "leverage": perp_position.get("leverage", 0),
+                    "effective_leverage": perp_position.get("effective_leverage"),
                     "liquidation_price": perp_position.get("liquidation_price", 0),
                     "funding": perp_position.get("cum_funding", 0)
                 })

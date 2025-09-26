@@ -195,21 +195,48 @@ class Delta:
         """Queries the details of a filled order by its OID and logs it to the database."""
         try:
             order_status = self.info.query_order_by_oid(self.address, oid)
-            if not order_status or 'order' not in order_status or order_status['order']['status'] != 'filled':
+            order_info = order_status.get('order') if isinstance(order_status, dict) else None
+
+            if not order_info or order_info.get('status') != 'filled':
                 logger.warning(f"試圖記錄訂單 {oid}，但其狀態不是 'filled'。將略過記錄。")
                 return
 
-            order_info = order_status['order']
-            coin = order_info['coin']
-            market = 'spot' if order_info['isSpot'] else 'perp'
-            side = 'buy' if order_info['side'] == 'B' else 'sell'
-            
-            # Use precise fill data
-            avg_fill_price = float(order_info['avgFillPx'])
-            filled_size = float(order_info['sz'])
+            coin = order_info.get('coin')
+            if not coin:
+                logger.error(f"訂單 {oid} 缺少 'coin' 欄位，無法記錄 Supabase 日誌。原始資料: {order_info}")
+                return
+
+            is_spot = order_info.get('isSpot', False)
+            market = 'spot' if is_spot else 'perp'
+
+            side_field = order_info.get('side')
+            side = 'buy'
+            if isinstance(side_field, str):
+                side = 'buy' if side_field.upper() in ('B', 'BUY') else 'sell'
+            elif isinstance(side_field, bool):
+                side = 'buy' if side_field else 'sell'
+
+            timestamp_ms = order_info.get('timestamp') or order_info.get('t')
+            if not timestamp_ms:
+                timestamp_iso = datetime.utcnow().isoformat()
+            else:
+                timestamp_iso = datetime.fromtimestamp(timestamp_ms / 1000).isoformat()
+
+            avg_fill_price = order_info.get('avgFillPx') or order_info.get('avgPx') or order_info.get('px')
+            filled_size = order_info.get('sz') or order_info.get('size')
+
+            try:
+                avg_fill_price = float(avg_fill_price) if avg_fill_price is not None else 0.0
+            except (TypeError, ValueError):
+                avg_fill_price = 0.0
+
+            try:
+                filled_size = float(filled_size) if filled_size is not None else 0.0
+            except (TypeError, ValueError):
+                filled_size = 0.0
 
             trade_data = {
-                'timestamp': datetime.fromtimestamp(order_info['timestamp'] / 1000).isoformat(),
+                'timestamp': timestamp_iso,
                 'coin': coin,
                 'market': market,
                 'side': side,
@@ -218,8 +245,9 @@ class Delta:
                 'order_id': oid,
                 'order_status': 'filled',
                 'operation_type': operation_type,
-                'raw_response': json.dumps(order_status) 
+                'raw_response': json.dumps(order_status)
             }
+
             db_logger.log_trade(trade_data)
 
         except Exception as e:
@@ -350,6 +378,30 @@ class Delta:
             if key == coin_name:
                 return float(value)
         return 0
+
+    def _get_emergency_price(self, coin_name: str, is_buy: bool, is_spot: bool) -> float:
+        """Fetch a price that is likely to execute immediately for rollback purposes."""
+        price = 0.0
+        try:
+            book = self.info.l2_snapshot(coin_name)
+            levels = book.get("levels", []) if isinstance(book, dict) else []
+            if levels and len(levels) >= 2:
+                best_bid = float(levels[0][0]['px']) if levels[0] else 0.0
+                best_ask = float(levels[1][0]['px']) if levels[1] else 0.0
+                price = best_ask if is_buy else best_bid
+        except Exception as e:
+            logger.warning(f"取得 {coin_name} 訂單簿失敗，改用中間價回退: {e}")
+
+        if price <= 0:
+            price = self._get_spot_price(coin_name) if is_spot else self._get_perp_price(coin_name)
+
+        if price <= 0:
+            # 當仍無法取得合理價格時，使用保守預設值避免送出無效訂單
+            price = 1.0
+
+        # 為確保 Ioc 訂單能成交，買單略微抬價、賣單略微降價
+        adjustment = 1.01 if is_buy else 0.99
+        return price * adjustment
     
     def round_size(self, coin_name: str, is_spot: bool, size: float) -> float:
         if size <= 0:
@@ -548,6 +600,15 @@ class Delta:
             self.user_state = self.info.user_state(self.address)
             self.spot_user_state = self.info.spot_user_state(self.address)
 
+            cross_summary_snapshot = self.user_state.get("crossMarginSummary", {})
+            current_perp_account_value = 0.0
+            cross_account_value = cross_summary_snapshot.get("accountValue")
+            if cross_account_value is not None:
+                try:
+                    current_perp_account_value = float(cross_account_value)
+                except (TypeError, ValueError):
+                    current_perp_account_value = 0.0
+
             # Clear existing position data before updating
             for coin in self.coins.values():
                 if coin.perp: coin.perp.position = {}
@@ -559,12 +620,27 @@ class Delta:
                     pos = position["position"]
                     coin_name = pos["coin"]
                     if coin_name in self.coins and self.coins[coin_name].perp:
+                        perp_position_value = float(pos.get("positionValue", 0))
+                        leverage_reported = pos.get("leverage", {}).get("value")
+                        try:
+                            leverage_reported = float(leverage_reported) if leverage_reported is not None else None
+                        except (TypeError, ValueError):
+                            leverage_reported = None
+
+                        effective_leverage = None
+                        if perp_position_value and current_perp_account_value:
+                            try:
+                                effective_leverage = abs(perp_position_value) / max(abs(current_perp_account_value), 1e-9)
+                            except Exception:
+                                effective_leverage = None
+
                         self.coins[coin_name].perp.position = {
                             "size": float(pos["szi"]),
                             "entry_price": float(pos["entryPx"]),
-                            "position_value": float(pos["positionValue"]),
+                            "position_value": perp_position_value,
                             "unrealized_pnl": float(pos["unrealizedPnl"]),
-                            "leverage": pos["leverage"]["value"],
+                            "leverage": leverage_reported,
+                            "effective_leverage": effective_leverage,
                             "liquidation_price": float(pos["liquidationPx"]),
                             "cum_funding": pos["cumFunding"]["allTime"]
                         }
@@ -608,11 +684,10 @@ class Delta:
                 }
             # Update derived account metrics
             self.margin_summary = self.user_state.get("marginSummary", {})
-            cross_summary = self.user_state.get("crossMarginSummary", {})
+            cross_summary = cross_summary_snapshot
 
             spot_account_value = self._get_total_spot_account_value()
-            cross_account_value = cross_summary.get("accountValue")
-            self.perp_user_state = float(cross_account_value) if cross_account_value is not None else 0.0
+            self.perp_user_state = current_perp_account_value
 
             margin_account_value = self.margin_summary.get("accountValue")
             if margin_account_value is not None:
@@ -680,7 +755,17 @@ class Delta:
             elif spot_info['state'] == 'filled':
                 logger.critical(f"現貨訂單 {spot_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
                 side_to_rollback = not (spot_info.get('side') == 'buy')
-                self.exchange.order(spot_pair, side_to_rollback, spot_size, 0, {"market": True})
+                emergency_price = self._get_emergency_price(coin_name, side_to_rollback, True)
+                logger.info(
+                    f"緊急回滾現貨 {'買' if side_to_rollback else '賣'}單，價格設定為 {emergency_price:.4f} (IOC)"
+                )
+                self.exchange.order(
+                    spot_pair,
+                    side_to_rollback,
+                    spot_size,
+                    emergency_price,
+                    {"limit": {"tif": "Ioc"}},
+                )
 
         if perp_info and perp_info["status"] == 'ok':
             if perp_info['state'] == 'resting':
@@ -689,7 +774,17 @@ class Delta:
             elif perp_info['state'] == 'filled':
                 logger.critical(f"合約訂單 {perp_info['oid']} 已被成交！正在提交市價單以緊急回滾！")
                 side_to_rollback = not (perp_info.get('side') == 'buy')
-                self.exchange.order(coin_name, side_to_rollback, perp_size, 0, {"market": True})
+                emergency_price = self._get_emergency_price(coin_name, side_to_rollback, False)
+                logger.info(
+                    f"緊急回滾永續 {'買' if side_to_rollback else '賣'}單，價格設定為 {emergency_price:.4f} (IOC)"
+                )
+                self.exchange.order(
+                    coin_name,
+                    side_to_rollback,
+                    perp_size,
+                    emergency_price,
+                    {"limit": {"tif": "Ioc"}},
+                )
 
     async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:
         """Attempts to place orders based on side (opening/closing) and type (maker/taker)."""

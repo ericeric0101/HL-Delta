@@ -17,6 +17,7 @@ export interface Position {
   position_value?: number;
   unrealized_pnl?: number;
   leverage?: number;
+  effective_leverage?: number | null;
   liquidation_price?: number;
   funding?: number;
   hold?: number;

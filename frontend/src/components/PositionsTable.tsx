@@ -21,11 +21,33 @@ const PositionsTable: React.FC<PositionsTableProps> = ({ positions }) => {
     return <Typography sx={{ p: 2 }}>No active positions.</Typography>;
   }
 
-  const formatPnl = (pnl: number) => (
-    <Typography variant="body2" color={pnl >= 0 ? 'success.main' : 'error.main'} sx={{ fontWeight: '500' }}>
-      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-    </Typography>
-  );
+          const formatPnl = (pnl: number) => (
+            <Typography variant="body2" color={pnl >= 0 ? 'success.main' : 'error.main'} sx={{ fontWeight: '500' }}>
+              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+            </Typography>
+          );
+
+  const formatLeverage = (pos: Position) => {
+    const effective = pos.effective_leverage ?? undefined;
+    const reported = pos.leverage ?? undefined;
+    const value = effective ?? reported;
+
+    if (!value) return 'N/A';
+
+    const text = `${value.toFixed(2)}x`;
+    if (effective && reported && Math.abs(effective - reported) > 0.5) {
+      return (
+        <Typography variant="body2" component="span" sx={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+          {text}
+          <Typography variant="caption" color="text.secondary">
+            (平台顯示 {reported.toFixed(2)}x)
+          </Typography>
+        </Typography>
+      );
+    }
+
+    return text;
+  };
 
   return (
     <TableContainer component={Paper} sx={{ boxShadow: 'none' }}>
@@ -66,7 +88,7 @@ const PositionsTable: React.FC<PositionsTableProps> = ({ positions }) => {
               <TableCell align="right">
                 {pos.unrealized_pnl ? formatPnl(pos.unrealized_pnl) : 'N/A'}
               </TableCell>
-              <TableCell align="right">{pos.leverage ? `${pos.leverage.toFixed(2)}x` : 'N/A'}</TableCell>
+              <TableCell align="right">{formatLeverage(pos)}</TableCell>
               <TableCell align="right">
                 {pos.liquidation_price ? `$${pos.liquidation_price.toFixed(2)}` : 'N/A'}
               </TableCell>

@@ -1,7 +1,7 @@
 {
   "general": {
     "debug": false,
-    "tracked_coins": ["HYPE", "XPL", "SOL", "ETH", "BTC"],
+    "tracked_coins": ["HYPE", "XPL", "ASTER", "SOL", "ETH", "BTC"],
     "autostart": false
   },
   "allocation": {
@@ -12,11 +12,28 @@
   },
   "trading": {
     "refresh_interval_sec": 60,
+    "heartbeat_sec": 3,
     "min_spot_balance_to_open": 1,
     "target_perp_leverage": 2.0,
+    "delta_threshold_pct": 5.0,
+    "min_rebalance_interval_sec": 5,
+    "max_retries": 3,
+    "slippage_cap_bps": 15,
+    "fee_bps": 2,
+    "min_qty": 0.001,
+    "price_tick": 0.001,
+    "qty_step": 0.001,
+    "funding_refresh_sec": 60,
+    "funding_use_ema": true,
+    "funding_ema_alpha": 0.3,
     "funding_check_minute": 50,
     "funding_open_threshold_pct": 10.0,
-    "funding_replace_threshold_pct": 20.0
+    "funding_replace_threshold_pct": 20.0,
+    "min_hold_minutes": 60,
+    "cooldown_after_replace_minutes": 30,
+    "use_post_only_for_entry": true,
+    "use_post_only_for_hedge": false,
+    "rebalance_order_type": "passive_then_ioc"
   },
   "api": {
     "host": "0.0.0.0",

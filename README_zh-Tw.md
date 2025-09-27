@@ -68,19 +68,20 @@
 - **執行邏輯**：
     1.  **定期監控**：機器人在主迴圈中會定期（例如每分鐘）檢查所有活躍的 Delta 中性倉位。
     2.  **價值計算**：它會計算每個倉位中「現貨部位的總價值」與「永續合約部位的總價值」。
-    3.  **觸發再平衡**：理想情況下，這兩個價值應該是相等的。如果因為價格波動導致兩者價值的差異超過了在 `config.json` 中設定的 `rebalance_threshold` 閾值（例如 5%），再平衡機制就會被觸發。
+    3.  **觸發再平衡**：理想情況下，這兩個價值應該是相等的。如果因為價格波動導致兩者價值的差異超過 `trading.delta_threshold_pct`（例如預設 5%），再平衡機制就會被觸發。
     4.  **自動微調**：機器人會自動計算需要調整的微小規模，並使用 Maker 訂單策略（參考想法一）執行反向操作（例如，賣出一點現貨，同時買回一點永續合約），將兩邊的價值重新拉平，恢復嚴格的 Delta 中性狀態。
 
 ### 主迴圈運作流程（持倉中時會做什麼？）
 
-每一次主迴圈（預設 60 秒一輪）會執行下列步驟：
+新的狀態機以 `trading.heartbeat_sec`（預設 3 秒）為節奏，在每次心跳內依序執行：
 
-1. **處理待成交訂單**：`check_pending_orders` 會追蹤所有尚未完成的掛單，必要時重新掛單或取消，確保開倉／平倉流程能順利完成。
-2. **維持 Delta 中性**：`check_and_rebalance_positions` 計算現貨與永續兩腿的名目價值，當差異超過 `rebalance_threshold` 時自動送出對沖訂單進行微調。
-3. **評估資金費率**：`check_hourly_funding_rates` 會在每小時的 50 分抓取最新費率，若目前持倉的年化報酬跌破 5%（或找到更佳標的），先觸發平倉流程，再轉入新的幣種。
-4. **尋找新機會**：`_check_for_new_position_opportunities` 只在完全沒有 Delta 部位時才嘗試開倉；若已有持倉，這一步會直接跳過，避免重複建倉。
+1. **同步帳戶與行情**：更新現貨／永續持倉、訂單簿與最新資金費率（支援 EMA 平滑）。
+2. **判斷狀態**：辨識是否為空倉、Delta 中性、單腿（僅剩現貨或僅剩永續）、再平衡、平倉或錯誤復原。
+3. **單腿補救與再平衡**：當偵測到單腿或 Δ 偏離超過 `delta_threshold_pct` 時，僅針對需要的一側下單，若連續 `max_retries` 失敗則改為迅速平倉。
+4. **收益評估與換倉**：持倉時若年化資金費率跌破 `funding_replace_threshold_pct`，且已達 `min_hold_minutes`，會先平舊倉再於冷卻 (`cooldown_after_replace_minutes`) 結束後尋找下一個標的。
+5. **空倉開倉判斷**：當完全沒有部位且最佳標的年化資金費率高於 `funding_open_threshold_pct` 時，依序建立現貨與永續腿，並在單腿失敗時自動回滾。
 
-換句話說，當我們已有部位時，Bot 的目標是「讓現有倉位保持中性、當收益變差就換標的」，而不是不停嘗試開新的 Delta 組合。
+因此，當我們已有部位時，Bot 的目標是「維持 Delta 中性、當收益變差就換標的」，而不是不停嘗試開新的 Delta 組合。
 
 ### 想法三：利潤再投資 — 自動複利
 
@@ -115,11 +116,28 @@
   },
   "trading": {
     "refresh_interval_sec": 60,
+    "heartbeat_sec": 3,
     "min_spot_balance_to_open": 50,
     "target_perp_leverage": 1.0,
+    "delta_threshold_pct": 5.0,
+    "min_rebalance_interval_sec": 5,
+    "max_retries": 3,
+    "slippage_cap_bps": 15,
+    "fee_bps": 2,
+    "min_qty": 0.001,
+    "price_tick": 0.001,
+    "qty_step": 0.001,
+    "funding_refresh_sec": 60,
+    "funding_use_ema": true,
+    "funding_ema_alpha": 0.3,
     "funding_check_minute": 50,
-    "funding_open_threshold_pct": 5.0,
-    "funding_replace_threshold_pct": 5.0
+    "funding_open_threshold_pct": 10.0,
+    "funding_replace_threshold_pct": 20.0,
+    "min_hold_minutes": 60,
+    "cooldown_after_replace_minutes": 30,
+    "use_post_only_for_entry": true,
+    "use_post_only_for_hedge": false,
+    "rebalance_order_type": "passive_then_ioc"
   },
   "api": {
     "host": "0.0.0.0",
@@ -135,18 +153,30 @@
   - `tracked_coins`: 要跟踪和交易的代幣列表
   - `autostart`: 是否自動開始交易
 - **交易設定 (`trading`):**
-  - `refresh_interval_sec`: 主迴圈檢查頻率（秒）。
-  - `min_spot_balance_to_open`: 開倉前保留在現貨帳戶的最低 USDC 金額，確保錢包不會被全數用盡。
-  - `target_perp_leverage`: 計算永續腿名目金額時的目標槓桿，用來限制新倉位的規模（預設 1.0 代表力求 1 倍）。
-  - `funding_check_minute`: 每小時第幾分鐘執行資金費率檢查（預設 50 代表整點前 10 分）。
-  - `funding_open_threshold_pct`: 沒有持倉時，若年化資金費率高於此值才會開新倉。
-  - `funding_replace_threshold_pct`: 已持倉時，若當前收益率低於此值才會尋找其它幣種並嘗試換倉。
+  - `heartbeat_sec`: 狀態機心跳間隔，預設 3 秒；所有持倉偵測與補救都在此節奏內完成。
+  - `refresh_interval_sec`: 保留舊設定以兼容舊流程，目前僅作回退用途。
+  - `min_spot_balance_to_open`: 開倉前保留在現貨帳戶的最低 USDC 金額。
+  - `target_perp_leverage`: 計算永續腿名目金額時的目標槓桿，上限新倉規模。
+  - `delta_threshold_pct`: 名目價值偏離超過此百分比即觸發再平衡。
+  - `min_rebalance_interval_sec`: 兩次再平衡之間的最短間隔，避免過度觸發。
+  - `max_retries`: 單腿補救 / 再平衡的最大重試次數，超過後改為平掉現有腿。
+  - `slippage_cap_bps`: 下單時允許的滑點上限（基於最佳買賣價）。
+  - `fee_bps`: 預估手續費，供名目計算與紀錄使用。
+  - `min_qty`, `price_tick`, `qty_step`: 若交易所未回傳最小下單量或步進單位，可在此強制指定。
+  - `funding_refresh_sec`: 每次向 Hyperliquid REST 取得 predictedFunding 的秒數。
+  - `funding_use_ema` / `funding_ema_alpha`: 是否啟用 EMA 平滑以及權重；預設啟用 α=0.3。
+  - `funding_check_minute`: 仍保留每小時例行檢查的時間點。
+  - `funding_open_threshold_pct`: 空倉時若最佳標的年化資金費率高於此值才會開倉。
+  - `funding_replace_threshold_pct`: 持倉時若當前收益率低於此值才會觸發換倉。
+  - `min_hold_minutes`: 最小持倉時間，避免在剛開倉後立即換倉。
+  - `cooldown_after_replace_minutes`: 換倉完成後的冷卻期。
+  - `use_post_only_for_entry`: 是否在進場／開倉使用 post only。
+  - `use_post_only_for_hedge`: 是否在補腿時使用 post only（預設禁用以避免拒單）。
+  - `rebalance_order_type`: `passive_then_ioc` 代表先用限價嘗試，未成交再降級成 IOC。
 - **分配設定:**
-  - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）
-  - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）
-  - `rebalance_threshold`: 重新平衡倉位的閾值（例如 0.05 = 5%）
-- **交易設定:**
-  - `refresh_interval_sec`: 以秒為單位的倉位刷新間隔
+  - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）。
+  - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）。
+  - `rebalance_threshold`: 若仍使用舊版比例再平衡，這裡保持支援；新版改以 `delta_threshold_pct` 為主。
 - **API 設定:**
   - `host`: API 伺服器的主機
   - `port`: API 伺服器的端口
@@ -185,13 +215,13 @@ python example.py
 - 系統會檢查 config.json 中的 autostart 設定，如果設為 true（預設值），機器人會自動開始交易。
 
 ## 一旦啟動，系統會進入主要監控循環：
-- 定期檢查：每 60 秒（可在配置中調整）檢查一次
-- 資金費率監控：在每小時的第 50 分鐘檢查資金費率
-- 自動下單條件：當找到年化收益率 ≥ 5% 的機會時會自動創建 delta-neutral 部位
+- **心跳頻率**：依 `heartbeat_sec`（預設 3 秒）運行狀態機，更新倉位並執行補腿/再平衡。
+- **資金費率監控**：依 `funding_refresh_sec` 收集最新 predicted funding；`funding_check_minute` 保留逐小時檢查。
+- **自動開倉條件**：當最佳幣種年化資金費率 ≥ `funding_open_threshold_pct` 且未處於冷卻/最小持倉期間時，自動建立 Delta 中性部位。
 
 ## 系統會自動執行以下操作：
 - 創建部位：同時買入現貨和做空永續合約
-- 切換部位：當當前部位收益率低於 5% 且有更好機會時，會自動關閉舊部位並創建新部位
+- 切換部位：當當前部位收益率低於 `funding_replace_threshold_pct` 且市場存在更好機會時，會自動關閉舊部位並創建新部位
 - 訂單追蹤：自動監控訂單執行狀態
 
 **注意 1**：如果想要手動控制而非自動交易，可以在 `config.json` 中將 autostart 設為 false，然後通過 API 端點手動控制機器人的啟動和停止。

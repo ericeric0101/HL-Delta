@@ -37,7 +37,29 @@ The preferred way to configure the bot is through the `config.json` file, which 
     "rebalance_threshold": 0.05
   },
   "trading": {
-    "refresh_interval_sec": 60
+    "refresh_interval_sec": 60,
+    "heartbeat_sec": 3,
+    "min_spot_balance_to_open": 50,
+    "target_perp_leverage": 1.0,
+    "delta_threshold_pct": 5.0,
+    "min_rebalance_interval_sec": 5,
+    "max_retries": 3,
+    "slippage_cap_bps": 15,
+    "fee_bps": 2,
+    "min_qty": 0.001,
+    "price_tick": 0.001,
+    "qty_step": 0.001,
+    "funding_refresh_sec": 60,
+    "funding_use_ema": true,
+    "funding_ema_alpha": 0.3,
+    "funding_check_minute": 50,
+    "funding_open_threshold_pct": 10.0,
+    "funding_replace_threshold_pct": 20.0,
+    "min_hold_minutes": 60,
+    "cooldown_after_replace_minutes": 30,
+    "use_post_only_for_entry": true,
+    "use_post_only_for_hedge": false,
+    "rebalance_order_type": "passive_then_ioc"
   },
   "api": {
     "host": "0.0.0.0",
@@ -57,7 +79,26 @@ Configuration sections:
   - `perp_pct`: Percentage of capital to allocate to perpetual positions (e.g., 30%)
   - `rebalance_threshold`: Threshold for rebalancing positions (e.g., 0.05 = 5%)
 - **Trading settings:**
-  - `refresh_interval_sec`: Interval for refreshing positions in seconds
+  - `heartbeat_sec`: State-machine heartbeat (default 3s) controlling position checks, hedging, and rebalancing cadence.
+  - `refresh_interval_sec`: Legacy refresh interval retained for backwards compatibility.
+  - `min_spot_balance_to_open`: Minimum USDC to keep in the spot wallet before opening a new position.
+  - `target_perp_leverage`: Target leverage used to size the perp leg.
+  - `delta_threshold_pct`: Notional imbalance threshold that triggers rebalancing.
+  - `min_rebalance_interval_sec`: Minimum spacing between two rebalancing attempts.
+  - `max_retries`: Maximum retries for hedging/rebalancing before failing back to flattening the open leg.
+  - `slippage_cap_bps`: Maximum allowed slippage (in basis points) relative to top-of-book prices when submitting orders.
+  - `fee_bps`: Estimated trading fee, used for reporting and guard-rails.
+  - `min_qty`, `price_tick`, `qty_step`: Optional overrides for minimum order size and tick/step increments when the exchange metadata is unavailable.
+  - `funding_refresh_sec`: Frequency for fetching predicted funding rates from Hyperliquid REST.
+  - `funding_use_ema` / `funding_ema_alpha`: Enable EMA smoothing of funding rates and configure its alpha.
+  - `funding_check_minute`: Optional hourly check minute for legacy hourly routines.
+  - `funding_open_threshold_pct`: Minimum annualized funding required to open a new position when flat.
+  - `funding_replace_threshold_pct`: Funding threshold below which the bot will close and look for a better market.
+  - `min_hold_minutes`: Minimum hold time before a position can be replaced.
+  - `cooldown_after_replace_minutes`: Cooling-off period after a replacement before opening another position.
+  - `use_post_only_for_entry`: Whether to use post-only orders while entering.
+  - `use_post_only_for_hedge`: Whether to use post-only orders while hedging (defaults to `false`).
+  - `rebalance_order_type`: `passive_then_ioc` attempts a passive limit first and falls back to IOC if needed.
 - **API settings:**
   - `host`: Host for the API server
   - `port`: Port for the API server
@@ -94,13 +135,13 @@ python example.py
 - The system checks the `autostart` setting in `config.json`. If set to `true` (the default), the bot will automatically start trading.
 
 ## Once started, the system enters the main monitoring loop:
-- **Periodic checks:** Every 60 seconds (configurable), the bot checks for opportunities.
-- **Funding Rate Monitoring:** At the 50th minute of each hour, it monitors funding rates.
-- **Automatic Order Condition:** When an opportunity with an annualized yield of ≥ 5% is found, it automatically creates a delta-neutral position.
+- **Heartbeat loop:** Every `heartbeat_sec` seconds (default 3s) the bot refreshes balances, handles hedging, and runs the state machine.
+- **Funding rate monitoring:** `funding_refresh_sec` controls how often predicted fundings are sampled; hourly checkpoints remain available through `funding_check_minute`.
+- **Automatic order condition:** When the best coin’s annualized funding exceeds `funding_open_threshold_pct`, the bot opens a new delta-neutral position (subject to hold/cooldown limits).
 
 ## The system automatically performs the following actions:
 - **Position Creation:** Simultaneously buys spot and shorts perpetual contracts.
-- **Position Switching:** If the current position's yield drops below 5% and a better opportunity is available, it closes the old position and opens a new one.
+- **Position Switching:** If the current position's yield drops below `funding_replace_threshold_pct` and a better opportunity is available, it closes the old position and opens a new one.
 - **Order Tracking:** Automatically monitors order execution status.
 
 **Note 1:** If you prefer manual control, set `autostart` to `false` in `config.json`. You can then start and stop the bot using API endpoints.

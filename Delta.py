@@ -76,6 +76,7 @@ class CoinInfo:
 class PositionState(Enum):
     EMPTY = auto()
     OPENING_SPOT = auto()
+    OPENING_BOTH = auto()
     OPENING_PERP = auto()
     OPENING_HEDGE = auto()
     DELTA_NEUTRAL = auto()
@@ -111,6 +112,7 @@ class OrderGroup:
     qty: float = 0.0
     price: float = 0.0
     needs_fallback: bool = False
+    key: str = ""
 
 
 @dataclass
@@ -148,7 +150,9 @@ class Delta:
             self._last_funding_refresh: float = 0.0
             self._last_position_refresh: float = 0.0
             self._last_heartbeat: float = 0.0
-            self._active_order_group: Optional[str] = None
+            self._active_order_groups: Dict[str, str] = {}
+            self._closing_lock: bool = False
+            self._last_close_ts: float = 0.0
             self._retry_counters: Dict[str, int] = {}
             self.min_qty: float = 0.0
             self.qty_step: float = 0.0
@@ -247,12 +251,19 @@ class Delta:
             if spot_market_found:
                 for perp_coin in perp_coins:
                     if perp_coin["name"] == coin_name:
+                        perp_tick = perp_coin.get("tickSize")
+                        if perp_tick is None:
+                            perp_tick = perp_coin.get("tickSz")
+                        try:
+                            perp_tick = float(perp_tick)
+                        except (TypeError, ValueError):
+                            perp_tick = self.coins[coin_name].spot.tick_size
                         self.coins[coin_name].perp = PerpMarket(
                             name=perp_coin["name"],
                             sz_decimals=perp_coin["szDecimals"],
                             max_leverage=perp_coin["maxLeverage"],
                             index=perp_coins.index(perp_coin),
-                            tick_size=self.coins[coin_name].spot.tick_size
+                            tick_size=perp_tick
                         )
                         break
             
@@ -290,6 +301,7 @@ class Delta:
         self.use_post_only_for_hedge = bool(trading_cfg.get("use_post_only_for_hedge", False))
         self.rebalance_order_type = trading_cfg.get("rebalance_order_type", "passive_then_ioc")
         self.min_position_value_usd = float(trading_cfg.get("min_position_value_usd", 10.0))
+        self.close_cooldown_sec = float(trading_cfg.get("close_cooldown_sec", 30.0))
 
         self._log_runtime_config()
         
@@ -502,19 +514,48 @@ class Delta:
                 return float(balance.get("total", 0))
         return 0
     
-    def _get_spot_price(self, coin_name):
-        mid_price = self.info.all_mids()
-        for key, value in mid_price.items():
-            if key == coin_name:
-                return float(value)
-        return 0
+    def _get_spot_price(self, coin_name: str) -> float:
+        """Get the latest spot mid price, handling U-prefix symbols."""
+        mids = self.info.all_mids()
+        coin_info = self.coins.get(coin_name)
+
+        candidates = []
+        if coin_info and coin_info.spot:
+            candidates.append(coin_info.spot.name)
+
+        candidates.append(coin_name)
+        if not coin_name.startswith('U'):
+            candidates.append(f"U{coin_name}")
+        else:
+            candidates.append(coin_name.lstrip('U'))
+
+        for key in dict.fromkeys(candidates):
+            value = mids.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
     
-    def _get_perp_price(self, coin_name):
-        mid_price = self.info.all_mids()
-        for key, value in mid_price.items():
-            if key == coin_name:
-                return float(value)
-        return 0
+    def _get_perp_price(self, coin_name: str) -> float:
+        """Get the perp mid price for a coin."""
+        mids = self.info.all_mids()
+        coin_info = self.coins.get(coin_name)
+
+        candidates = []
+        if coin_info and coin_info.perp:
+            candidates.append(coin_info.perp.name)
+        candidates.append(coin_name)
+
+        for key in dict.fromkeys(candidates):
+            value = mids.get(key)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
 
     def _get_filled_size_from_oid(self, oid: Optional[int]) -> Optional[float]:
         if not oid:
@@ -589,15 +630,30 @@ class Delta:
             return 0
         return max(rounded, 0)
     
-    def round_price(self, coin_name: str, price: float) -> float:
-        if coin_name not in self.coins:
+    def round_price(self, coin_name: str, price: float, is_spot: bool) -> float:
+        if price <= 0:
             return price
-            
-        tick_size = self.coins[coin_name].spot.tick_size
+
+        tick_size = 0.0
+        coin_info = self.coins.get(coin_name)
+        market = None
+        if coin_info:
+            market = coin_info.spot if is_spot else coin_info.perp
+        if market and getattr(market, "tick_size", 0):
+            try:
+                tick_size = float(market.tick_size)
+            except (TypeError, ValueError):
+                tick_size = 0.0
+
+        if tick_size <= 0 and self.price_tick > 0:
+            tick_size = self.price_tick
+
         if tick_size <= 0:
-            return price
-            
-        return round(price / tick_size) * tick_size
+            tick_size = 0.0001
+
+        steps = round(price / tick_size)
+        rounded = steps * tick_size
+        return float(round(rounded, 12))
     
     def _calculate_optimal_spot_size(self, coin_name):
         # Get the latest L1 price for accurate calculation
@@ -691,13 +747,20 @@ class Delta:
         return rounded_size
     
     def _normalize_spot_coin(self, coin_name: str) -> str:
-        if coin_name == "UBTC":
-            return "BTC"
-        if coin_name == "UETH":
-            return "ETH"
-        if coin_name == "USOL":
-            return "SOL"
-        return coin_name
+        """Normalize Hyperliquid spot symbols (e.g. UXPL -> XPL)."""
+        if not coin_name:
+            return coin_name
+
+        upper = coin_name.upper()
+        if upper in {"USDC", "USDT"}:
+            return upper
+
+        if upper.startswith('U') and len(upper) > 1:
+            candidate = upper[1:]
+            if candidate in self.tracked_coins or candidate in self.coins:
+                return candidate
+
+        return upper
 
     def _get_total_spot_account_value(self):
         if not self.spot_user_state:
@@ -1128,6 +1191,9 @@ class Delta:
         logger.info(
             f"倉位有效金額閾值: ≥ {self.min_position_value_usd:.2f} USDC"
         )
+        logger.info(
+            f"換倉冷卻時間: {self.close_cooldown_sec:.1f} 秒"
+        )
 
     
     def get_best_yearly_funding_rate(self):
@@ -1158,7 +1224,7 @@ class Delta:
             self.last_state_change = time.time()
 
     async def _maybe_open_position(self) -> None:
-        if self._active_order_group:
+        if any(group.intent.startswith("entry") for group in self.order_groups.values()):
             return
 
         now = time.time()
@@ -1193,51 +1259,48 @@ class Delta:
             logger.info(f"{coin_name} 計算得出開倉數量為 0，放棄開倉。")
             return False
 
-        self.active_coin = coin_name
-        self._transition_state(PositionState.OPENING_SPOT)
-
-        for attempt in range(self.max_retries):
-            logger.info(f"開倉第 {attempt + 1} 次嘗試：先買入現貨 {coin_name}")
-            group = await self.place_order_best_effort(coin_name, "spot", "buy", spot_size, "entry")
-            if not group:
-                continue
-            outcome = await self.await_fills_or_timeout(group.group_id, timeout_sec=5)
-            if outcome.get("filled"):
-                logger.info(f"{coin_name} 現貨腿建立完成。")
-                break
-        else:
-            logger.error(f"{coin_name} 現貨腿連續 {self.max_retries} 次失敗，進入錯誤復原。")
-            self._transition_state(PositionState.ERROR_RECOVERY)
-            await self.close_existing_leg_asap(coin_name, "spot")
-            self.active_coin = None
-            self._transition_state(PositionState.EMPTY)
-            return False
-
-        await self._refresh_positions_if_due(force=True)
-        self._transition_state(PositionState.OPENING_PERP)
-
         perp_qty = self.round_size(coin_name, False, spot_size)
         if perp_qty <= 0:
-            logger.error(f"{coin_name} 永續腿數量計算為 0，啟動錯誤復原。")
-            await self.close_existing_leg_asap(coin_name, "spot")
-            self.active_coin = None
-            self._transition_state(PositionState.EMPTY)
+            logger.error(f"{coin_name} 永續腿數量計算為 0，放棄開倉。")
             return False
 
-        for attempt in range(self.max_retries):
-            logger.info(f"開倉第 {attempt + 1} 次嘗試：賣出永續 {coin_name}")
-            group = await self.place_order_best_effort(coin_name, "perp", "sell", perp_qty, "entry")
-            if not group:
+        self.active_coin = coin_name
+        self._transition_state(PositionState.OPENING_BOTH)
+
+        entry_tasks = [
+            self._execute_entry_leg(coin_name, "spot", "buy", spot_size, allow_post_only=self.use_post_only_for_entry),
+            self._execute_entry_leg(coin_name, "perp", "sell", perp_qty, allow_post_only=self.use_post_only_for_entry),
+        ]
+
+        results = await asyncio.gather(*entry_tasks, return_exceptions=True)
+
+        leg_success = {"spot": False, "perp": False}
+        for res in results:
+            if isinstance(res, Exception):
+                logger.error(f"開倉子任務拋出例外: {res}")
                 continue
-            outcome = await self.await_fills_or_timeout(group.group_id, timeout_sec=5)
-            if outcome.get("filled"):
-                logger.info(f"{coin_name} 永續腿建立完成。")
-                break
-        else:
-            logger.error(f"{coin_name} 永續腿連續 {self.max_retries} 次失敗，回滾現貨腿。")
-            await self.close_existing_leg_asap(coin_name, "spot")
-            self.active_coin = None
+            if res.get("success"):
+                leg_success[res["market"]] = True
+            else:
+                logger.error(
+                    f"{coin_name} {res['market']} 腿開倉失敗 ({res.get('status')})"
+                )
+
+        if not leg_success["spot"] and not leg_success["perp"]:
             self._transition_state(PositionState.ERROR_RECOVERY)
+            self.active_coin = None
+            return False
+
+        if leg_success["spot"] and not leg_success["perp"]:
+            await self.close_existing_leg_asap(coin_name, "spot")
+            self._transition_state(PositionState.ERROR_RECOVERY)
+            self.active_coin = None
+            return False
+
+        if leg_success["perp"] and not leg_success["spot"]:
+            await self.close_existing_leg_asap(coin_name, "perp")
+            self._transition_state(PositionState.ERROR_RECOVERY)
+            self.active_coin = None
             return False
 
         await self._refresh_positions_if_due(force=True)
@@ -1249,6 +1312,66 @@ class Delta:
             logger.warning(f"{coin_name} 開倉後 Delta 偏離 {snapshot.delta_pct:.2f}% ，將進入再平衡。")
             self._transition_state(PositionState.REBALANCING)
         return True
+
+    async def _execute_entry_leg(
+        self,
+        coin_name: str,
+        market: str,
+        side: str,
+        qty: float,
+        allow_post_only: bool = True,
+        timeout_sec: float = 1.0,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"market": market, "side": side, "success": False}
+
+        primary_group = await self.place_order_best_effort(
+            coin_name,
+            market,
+            side,
+            qty,
+            "entry",
+            allow_post_only=allow_post_only,
+        )
+
+        if not primary_group:
+            result["status"] = "submission_failed"
+            return result
+
+        outcome = await self.await_fills_or_timeout(
+            primary_group.group_id,
+            timeout_sec=max(0.5, timeout_sec),
+            poll_interval=0.2,
+        )
+        if outcome.get("filled"):
+            result["success"] = True
+            return result
+
+        if allow_post_only:
+            fallback_group = await self.place_order_best_effort(
+                coin_name,
+                market,
+                side,
+                qty,
+                "entry",
+                allow_post_only=False,
+            )
+            if not fallback_group:
+                result["status"] = outcome.get("status", "maker_timeout")
+                return result
+
+            fallback_outcome = await self.await_fills_or_timeout(
+                fallback_group.group_id,
+                timeout_sec=max(1.2, timeout_sec),
+                poll_interval=0.2,
+            )
+            if fallback_outcome.get("filled"):
+                result["success"] = True
+                return result
+            result["status"] = fallback_outcome.get("status")
+            return result
+
+        result["status"] = outcome.get("status")
+        return result
 
     async def _handle_one_leg(self, coin_name: str, snapshot: PositionSnapshot, missing_leg: str) -> None:
         key = f"hedge:{coin_name}:{missing_leg}"
@@ -1346,9 +1469,9 @@ class Delta:
             logger.debug(f"{coin_name} 缺少年化資金費率資料，暫不換倉。")
             return
 
-        logger.info(
-            f"持倉：持倉換倉門檻={self.funding_replace_threshold_pct:.2f}%；當前={coin_name}({current_rate:.2f}%)"
-        )
+        # logger.info(
+        #     f"持倉：持倉換倉門檻={self.funding_replace_threshold_pct:.2f}%；當前={coin_name}({current_rate:.2f}%)"
+        # )
 
         if current_rate >= self.funding_replace_threshold_pct:
             logger.info("收益率高於門檻 → 維持現倉")
@@ -1364,72 +1487,80 @@ class Delta:
         await self._close_position(coin_name, reason="replace")
 
     async def _close_position(self, coin_name: str, reason: str = "manual") -> bool:
-        snapshot = self.position_snapshot(coin_name)
-        if snapshot.spot_size == 0 and abs(snapshot.perp_size) == 0:
-            logger.info(f"{coin_name} 無持倉可平。")
-            self._transition_state(PositionState.EMPTY)
-            self.active_coin = None
-            return True
+        if self._closing_lock:
+            logger.info(f"{coin_name} 正在執行關倉流程，忽略重覆請求。")
+            return False
 
-        self._transition_state(PositionState.CLOSING)
-        success = True
+        self._closing_lock = True
+        try:
+            self._transition_state(PositionState.CLOSING)
 
-        if abs(snapshot.perp_size) > 0:
-            perp_side = "buy" if snapshot.perp_size < 0 else "sell"
-            group = await self.place_order_best_effort(
-                coin_name,
-                "perp",
-                perp_side,
-                abs(snapshot.perp_size),
-                "close",
-                allow_post_only=False,
-            )
-            if group:
-                outcome = await self.await_fills_or_timeout(group.group_id, timeout_sec=5)
-                if not outcome.get("filled"):
-                    logger.warning(f"{coin_name} 永續腿平倉未成交 ({outcome.get('status')})，改用緊急平倉。")
-                    success = await self.close_existing_leg_asap(coin_name, "perp") and success
+            dust_threshold = max(self.min_position_value_usd, 0)
+            max_attempts = max(self.max_retries * 6, 12)
+            attempts = 0
 
-        await self._refresh_positions_if_due(force=True)
-        snapshot = self.position_snapshot(coin_name)
+            while attempts < max_attempts:
+                await self._refresh_positions_if_due(force=True)
+                snapshot = self.position_snapshot(coin_name)
 
-        if snapshot.spot_size > 0:
-            group = await self.place_order_best_effort(
-                coin_name,
-                "spot",
-                "sell",
-                snapshot.spot_size,
-                "close",
-                allow_post_only=False,
-            )
-            if group:
-                outcome = await self.await_fills_or_timeout(group.group_id, timeout_sec=5)
-                if not outcome.get("filled"):
-                    logger.warning(f"{coin_name} 現貨腿平倉未成交 ({outcome.get('status')})，改用緊急平倉。")
-                    success = await self.close_existing_leg_asap(coin_name, "spot") and success
+                spot_notional_ok = snapshot.spot_notional <= dust_threshold
+                perp_notional_ok = snapshot.perp_notional <= dust_threshold
 
-        await self._refresh_positions_if_due(force=True)
-        final_snapshot = self.position_snapshot(coin_name)
-        if final_snapshot.spot_size == 0 and abs(final_snapshot.perp_size) == 0:
-            logger.info(f"{coin_name} 部位已全部平倉。")
-            self.active_coin = None
-            self._transition_state(PositionState.EMPTY)
-            if reason == "replace":
-                self.last_replace_ts = time.time()
-            return success
+                if spot_notional_ok and perp_notional_ok:
+                    logger.info(f"{coin_name} 部位已全部平倉。")
+                    self.active_coin = None
+                    self._transition_state(PositionState.EMPTY)
+                    if reason == "replace":
+                        self.last_replace_ts = time.time()
+                    return True
 
-        logger.warning(f"{coin_name} 平倉後仍有殘留部位 (spot={final_snapshot.spot_size}, perp={final_snapshot.perp_size})")
-        if final_snapshot.spot_size > 0 and abs(final_snapshot.perp_size) == 0:
-            self._transition_state(PositionState.ONE_LEG_SPOT_ONLY)
-        elif final_snapshot.spot_size == 0 and abs(final_snapshot.perp_size) > 0:
-            self._transition_state(PositionState.ONE_LEG_PERP_ONLY)
-        else:
+                if not spot_notional_ok and snapshot.spot_size > 0:
+                    attempts += 1
+                    logger.info(f"正在強制平倉 {coin_name} 現貨腿，剩餘 {snapshot.spot_size:.6f} ({snapshot.spot_notional:.2f} USDC)")
+                    spot_closed = await self.close_existing_leg_asap(coin_name, "spot")
+                    if not spot_closed:
+                        logger.warning(f"{coin_name} 現貨腿強制平倉失敗，將重試。")
+                        await asyncio.sleep(0.3)
+                        continue
+
+                await self._refresh_positions_if_due(force=True)
+                snapshot = self.position_snapshot(coin_name)
+                spot_notional_ok = snapshot.spot_notional <= dust_threshold
+                perp_notional_ok = snapshot.perp_notional <= dust_threshold
+
+                if not perp_notional_ok and abs(snapshot.perp_size) > 0:
+                    attempts += 1
+                    logger.info(f"正在強制平倉 {coin_name} 永續腿，剩餘 {snapshot.perp_size:.6f} ({snapshot.perp_notional:.2f} USDC)")
+                    perp_closed = await self.close_existing_leg_asap(coin_name, "perp")
+                    if not perp_closed:
+                        logger.warning(f"{coin_name} 永續腿強制平倉失敗，將重試。")
+                        await asyncio.sleep(0.3)
+                        continue
+
+                if spot_notional_ok and perp_notional_ok:
+                    continue
+
+                await asyncio.sleep(0.2)
+
+            logger.error(f"{coin_name} 關倉超過最大嘗試次數，仍有殘留部位。")
             self._transition_state(PositionState.ERROR_RECOVERY)
-        return False
+            return False
 
+        finally:
+            self._last_close_ts = time.time()
+            self._closing_lock = False
     async def _run_state_machine(self) -> None:
         await self._refresh_positions_if_due()
         await self._refresh_funding_if_due()
+
+        if self._closing_lock:
+            logger.debug("關倉鎖定中，略過策略決策")
+            return
+
+        cooldown = getattr(self, "close_cooldown_sec", 30)
+        if cooldown > 0 and (time.time() - self._last_close_ts) < cooldown:
+            logger.debug("關倉冷卻中，暫不進行策略判斷")
+            return
 
         coin = self._detect_active_coin()
         if coin:
@@ -1495,9 +1626,6 @@ class Delta:
         allow_post_only: bool = True,
     ) -> Optional[OrderGroup]:
         """Place an order with contextual strategy and automatic fallbacks."""
-        if self._active_order_group:
-            logger.debug(f"已有活躍 order_group {self._active_order_group}，略過新下單請求。")
-            return None
 
         is_spot = market == "spot"
         rounded_qty = self.round_size(coin_name, is_spot, qty)
@@ -1515,17 +1643,6 @@ class Delta:
             logger.error(f"{coin_name} 缺少有效價格，無法送出 {market} {side} 訂單。")
             return None
 
-        slippage_factor = self.slippage_cap_bps / 10000 if self.slippage_cap_bps > 0 else 0
-        if side == "buy":
-            price = base_price * (1 + slippage_factor)
-        else:
-            price = base_price * (1 - slippage_factor)
-
-        price = self.round_price(coin_name, price)
-        if price <= 0:
-            logger.error(f"{coin_name} 欠缺有效價格，終止下單。")
-            return None
-
         params = {"limit": {}}
         use_post_only = False
         if allow_post_only:
@@ -1536,17 +1653,53 @@ class Delta:
                 params["limit"]["tif"] = "Alo"
                 use_post_only = True
 
-        needs_fallback = False
-        if intent in ("hedge", "close") and not use_post_only:
+        coin_info = self.coins.get(coin_name)
+        tick_size = 0.0
+        if coin_info:
+            market_info = coin_info.spot if is_spot else coin_info.perp
+            if market_info and getattr(market_info, "tick_size", 0):
+                try:
+                    tick_size = float(market_info.tick_size)
+                except (TypeError, ValueError):
+                    tick_size = 0.0
+        if tick_size <= 0 and self.price_tick > 0:
+            tick_size = self.price_tick
+        if tick_size <= 0:
+            tick_size = 0.0001
+
+        slippage_factor = self.slippage_cap_bps / 10000 if self.slippage_cap_bps > 0 else 0
+        if side == "buy":
+            price = base_price * (1 + slippage_factor)
+        else:
+            price = base_price * (1 - slippage_factor)
+
+        if use_post_only:
+            if side == "buy" and best_bid > 0:
+                maker_price = best_bid - tick_size
+                if maker_price <= 0:
+                    maker_price = max(best_bid * 0.999, tick_size)
+                price = min(price, maker_price)
+            elif side == "sell" and best_ask > 0:
+                maker_price = best_ask + tick_size
+                price = max(price, maker_price)
+
+        price = self.round_price(coin_name, price, is_spot)
+        if price <= 0:
+            logger.error(f"{coin_name} 欠缺有效價格，終止下單。")
+            return None
+
+        needs_fallback = use_post_only and intent in ("entry", "hedge", "rebalance")
+        if intent in ("entry", "hedge") and not use_post_only:
             params["limit"]["tif"] = "Ioc"
         elif intent == "rebalance":
             if self.rebalance_order_type == "passive_then_ioc":
                 params["limit"]["tif"] = "Gtc"
-                needs_fallback = True
             else:
                 params["limit"]["tif"] = "Ioc"
-        elif "tif" not in params["limit"] and not use_post_only:
-            params["limit"]["tif"] = "Ioc" if intent != "entry" else "Gtc"
+        elif intent == "close":
+            params["limit"]["tif"] = "Ioc"
+        elif "tif" not in params["limit"]:
+            params["limit"]["tif"] = "Gtc"
 
         market_name = self._get_spot_pair(coin_name) if is_spot else coin_name
         side_bool = True if side == "buy" else False
@@ -1575,6 +1728,11 @@ class Delta:
 
         oid = status.get("oid")
         group_id = str(uuid.uuid4())
+        group_key = f"{coin_name}:{market}:{intent}"
+        if group_key in self._active_order_groups:
+            logger.debug(f"{group_key} 已有活躍訂單群組，跳過重覆下單。")
+            return None
+
         group = OrderGroup(
             group_id=group_id,
             coin=coin_name,
@@ -1586,9 +1744,10 @@ class Delta:
             qty=rounded_qty,
             price=price,
             needs_fallback=needs_fallback,
+            key=group_key,
         )
         self.order_groups[group_id] = group
-        self._active_order_group = group_id
+        self._active_order_groups[group_key] = group_id
         return group
 
     async def await_fills_or_timeout(
@@ -1655,7 +1814,7 @@ class Delta:
                 price = base_price * (1 + slippage_factor)
             else:
                 price = base_price * (1 - slippage_factor)
-            price = self.round_price(group.coin, price)
+            price = self.round_price(group.coin, price, group.market == "spot")
             params = {"limit": {"tif": "Ioc"}}
             market_name = self._get_spot_pair(group.coin) if group.market == "spot" else group.coin
             side_bool = True if group.side == "buy" else False
@@ -1690,9 +1849,9 @@ class Delta:
             result_summary.update({"status": "timeout", "filled": False})
 
         # Cleanup
-        self.order_groups.pop(order_group_id, None)
-        if self._active_order_group == order_group_id:
-            self._active_order_group = None
+        group = self.order_groups.pop(order_group_id, None)
+        if group:
+            self._active_order_groups.pop(group.key, None)
 
         return result_summary
 
@@ -1795,12 +1954,12 @@ class Delta:
             best_ask = float(l2_book["levels"][1][0]['px'])
 
             if order_type == 'maker':
-                spot_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
-                perp_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
+                spot_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask, True)
+                perp_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid, False)
                 order_params = {"limit": {"tif": "Alo"}}
             else: # taker
-                spot_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid)
-                perp_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask)
+                spot_price = self.round_price(coin_name, best_ask if side == 'opening' else best_bid, True)
+                perp_price = self.round_price(coin_name, best_bid if side == 'opening' else best_ask, False)
                 order_params = {"limit": {"tif": "Ioc"}} # Immediate Or Cancel
 
             if side == 'opening':
@@ -2063,7 +2222,7 @@ class Delta:
                     spot_pair = self._get_spot_pair(coin_name)
                     side = not is_closing # Buy if opening, Sell if closing
                     price = best_bid if side else best_ask
-                    rounded_price = self.round_price(coin_name, price)
+                    rounded_price = self.round_price(coin_name, price, True)
                     rounded_size = self.round_size(coin_name, True, spot_size)
                     
                     logger.info(f"重新掛單現貨 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
@@ -2081,7 +2240,7 @@ class Delta:
                 if perp_size != 0:
                     side = is_closing # Buy if closing, Sell if opening
                     price = best_bid if side else best_ask
-                    rounded_price = self.round_price(coin_name, price)
+                    rounded_price = self.round_price(coin_name, price, False)
                     rounded_size = self.round_size(coin_name, False, abs(perp_size))
 
                     logger.info(f"重新掛單永續合約 {'買單' if side else '賣單'} ({coin_name}): {rounded_size} @ {rounded_price}")
@@ -2200,12 +2359,14 @@ class Delta:
 
                 # Place spot sell order
                 spot_pair = self._get_spot_pair(coin_name)
-                spot_order_result = self.exchange.order(spot_pair, False, adjustment_size_spot, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'spot', 'sell', adjustment_size_spot, self.round_price(coin_name, best_ask), spot_order_result, 'rebalancing')
+                spot_price = self.round_price(coin_name, best_ask, True)
+                spot_order_result = self.exchange.order(spot_pair, False, adjustment_size_spot, spot_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'spot', 'sell', adjustment_size_spot, spot_price, spot_order_result, 'rebalancing')
                 
                 # Place perp buy order
-                perp_order_result = self.exchange.order(coin_name, True, adjustment_size_perp, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'perp', 'buy', adjustment_size_perp, self.round_price(coin_name, best_bid), perp_order_result, 'rebalancing')
+                perp_price = self.round_price(coin_name, best_bid, False)
+                perp_order_result = self.exchange.order(coin_name, True, adjustment_size_perp, perp_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'perp', 'buy', adjustment_size_perp, perp_price, perp_order_result, 'rebalancing')
 
             else: # perp_value > spot_value
                 # Buy spot, Sell (open) perp
@@ -2221,12 +2382,14 @@ class Delta:
 
                 # Place spot buy order
                 spot_pair = self._get_spot_pair(coin_name)
-                spot_order_result = self.exchange.order(spot_pair, True, adjustment_size_spot, self.round_price(coin_name, best_bid), {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'spot', 'buy', adjustment_size_spot, self.round_price(coin_name, best_bid), spot_order_result, 'rebalancing')
-
+                spot_price = self.round_price(coin_name, best_bid, True)
+                spot_order_result = self.exchange.order(spot_pair, True, adjustment_size_spot, spot_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'spot', 'buy', adjustment_size_spot, spot_price, spot_order_result, 'rebalancing')
+                
                 # Place perp sell order
-                perp_order_result = self.exchange.order(coin_name, False, adjustment_size_perp, self.round_price(coin_name, best_ask), {"limit": {"tif": "Alo"}})
-                self._log_order_submission(coin_name, 'perp', 'sell', adjustment_size_perp, self.round_price(coin_name, best_ask), perp_order_result, 'rebalancing')
+                perp_price = self.round_price(coin_name, best_ask, False)
+                perp_order_result = self.exchange.order(coin_name, False, adjustment_size_perp, perp_price, {"limit": {"tif": "Alo"}})
+                self._log_order_submission(coin_name, 'perp', 'sell', adjustment_size_perp, perp_price, perp_order_result, 'rebalancing')
             
             logger.info(f"已為 {coin_name} 送出再平衡訂單。")
 

@@ -57,6 +57,7 @@ The preferred way to configure the bot is through the `config.json` file, which 
     "funding_replace_threshold_pct": 20.0,
     "min_hold_minutes": 60,
     "cooldown_after_replace_minutes": 30,
+    "close_cooldown_sec": 30,
     "use_post_only_for_entry": true,
     "use_post_only_for_hedge": false,
     "rebalance_order_type": "passive_then_ioc",
@@ -97,6 +98,7 @@ Configuration sections:
   - `funding_replace_threshold_pct`: Funding threshold below which the bot will close and look for a better market.
   - `min_hold_minutes`: Minimum hold time before a position can be replaced.
   - `cooldown_after_replace_minutes`: Cooling-off period after a replacement before opening another position.
+  - `close_cooldown_sec`: Grace period after a close before the bot evaluates opening/replacement again.
   - `use_post_only_for_entry`: Whether to use post-only orders while entering.
   - `use_post_only_for_hedge`: Whether to use post-only orders while hedging (defaults to `false`).
   - `rebalance_order_type`: `passive_then_ioc` attempts a passive limit first and falls back to IOC if needed.

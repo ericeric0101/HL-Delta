@@ -135,6 +135,7 @@
     "funding_replace_threshold_pct": 20.0,
     "min_hold_minutes": 60,
     "cooldown_after_replace_minutes": 30,
+    "close_cooldown_sec": 30,
     "use_post_only_for_entry": true,
     "use_post_only_for_hedge": false,
     "rebalance_order_type": "passive_then_ioc",
@@ -171,6 +172,7 @@
   - `funding_replace_threshold_pct`: 持倉時若當前收益率低於此值才會觸發換倉。
   - `min_hold_minutes`: 最小持倉時間，避免在剛開倉後立即換倉。
   - `cooldown_after_replace_minutes`: 換倉完成後的冷卻期。
+  - `close_cooldown_sec`: 完成平倉後的觀察冷卻秒數，期間內不會再評估換倉。
   - `use_post_only_for_entry`: 是否在進場／開倉使用 post only。
   - `use_post_only_for_hedge`: 是否在補腿時使用 post only（預設禁用以避免拒單）。
   - `rebalance_order_type`: `passive_then_ioc` 代表先用限價嘗試，未成交再降級成 IOC。

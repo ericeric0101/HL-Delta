@@ -137,7 +137,8 @@
     "cooldown_after_replace_minutes": 30,
     "use_post_only_for_entry": true,
     "use_post_only_for_hedge": false,
-    "rebalance_order_type": "passive_then_ioc"
+    "rebalance_order_type": "passive_then_ioc",
+    "min_position_value_usd": 10.0
   },
   "api": {
     "host": "0.0.0.0",
@@ -173,6 +174,7 @@
   - `use_post_only_for_entry`: 是否在進場／開倉使用 post only。
   - `use_post_only_for_hedge`: 是否在補腿時使用 post only（預設禁用以避免拒單）。
   - `rebalance_order_type`: `passive_then_ioc` 代表先用限價嘗試，未成交再降級成 IOC。
+  - `min_position_value_usd`: 單腿名目價值若低於此金額（USDC），視為零倉位並忽略。
 - **分配設定:**
   - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）。
   - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）。

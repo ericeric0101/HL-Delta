@@ -167,6 +167,8 @@ class Delta:
             self.funding_refresh_sec: float = 60.0
             self.min_hold_minutes: float = 60.0
             self.cooldown_after_replace_minutes: float = 30.0
+            self.min_position_value_usd: float = 10.0
+            self._dust_warnings: Dict[str, bool] = {}
             
             if self.config["general"].get("debug", False):
                 logger.setLevel(logging.DEBUG)
@@ -287,6 +289,7 @@ class Delta:
         self.use_post_only_for_entry = bool(trading_cfg.get("use_post_only_for_entry", True))
         self.use_post_only_for_hedge = bool(trading_cfg.get("use_post_only_for_hedge", False))
         self.rebalance_order_type = trading_cfg.get("rebalance_order_type", "passive_then_ioc")
+        self.min_position_value_usd = float(trading_cfg.get("min_position_value_usd", 10.0))
 
         self._log_runtime_config()
         
@@ -732,6 +735,24 @@ class Delta:
             return 0.0
         return spot_value / total_value
 
+    def _dust_key(self, coin_name: str, leg: str) -> str:
+        return f"{coin_name}:{leg}"
+
+    def _mark_dust(self, coin_name: str, leg: str, notional: float) -> None:
+        key = self._dust_key(coin_name, leg)
+        if notional <= 0:
+            return
+        if not self._dust_warnings.get(key):
+            logger.info(
+                f"忽略小額倉位 {coin_name} {leg} ({notional:.2f} USDC < {self.min_position_value_usd:.2f} USDC 閾值)"
+            )
+            self._dust_warnings[key] = True
+
+    def _clear_dust(self, coin_name: str, leg: str) -> None:
+        key = self._dust_key(coin_name, leg)
+        if key in self._dust_warnings:
+            del self._dust_warnings[key]
+
     def _get_top_of_book(self, coin_name: str) -> Tuple[float, float]:
         """Return (best_bid, best_ask) with graceful fallbacks."""
         best_bid = best_ask = 0.0
@@ -764,8 +785,10 @@ class Delta:
         if not coin_info or not (coin_info.spot and coin_info.perp):
             return PositionSnapshot(coin_name, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-        spot_size = float(coin_info.spot.position.get("total", 0) or 0)
-        perp_size = float(coin_info.perp.position.get("size", 0) or 0)
+        threshold = max(self.min_position_value_usd, 0)
+
+        raw_spot_size = float(coin_info.spot.position.get("total", 0) or 0)
+        raw_perp_size = float(coin_info.perp.position.get("size", 0) or 0)
 
         spot_price = coin_info.spot.position.get("mark_price") or self._get_spot_price(coin_name)
         perp_price = self._get_perp_price(coin_name)
@@ -777,10 +800,34 @@ class Delta:
         if not spot_price or spot_price <= 0:
             spot_price = perp_price = 0.0
 
-        spot_notional = abs(spot_size * spot_price)
-        perp_notional = abs(perp_size * perp_price)
+        raw_spot_notional = abs(raw_spot_size * spot_price)
+        raw_perp_notional = abs(raw_perp_size * perp_price)
+
+        spot_size = raw_spot_size
+        perp_size = raw_perp_size
+        spot_notional = raw_spot_notional
+        perp_notional = raw_perp_notional
+
+        if 0 < raw_spot_notional < threshold:
+            self._mark_dust(coin_name, "spot", raw_spot_notional)
+            spot_size = 0.0
+            spot_notional = 0.0
+        else:
+            self._clear_dust(coin_name, "spot")
+
+        if 0 < raw_perp_notional < threshold:
+            self._mark_dust(coin_name, "perp", raw_perp_notional)
+            perp_size = 0.0
+            perp_notional = 0.0
+        else:
+            self._clear_dust(coin_name, "perp")
+
         denominator = max(spot_notional, perp_notional, 1e-9)
         delta_pct = 0.0 if denominator == 0 else abs(spot_notional - perp_notional) / denominator * 100
+
+        logger.debug(
+            f"{coin_name} 有效倉位 → 現貨 {spot_notional:.2f} USDC / 永續 {perp_notional:.2f} USDC (閾值 {threshold:.2f})"
+        )
 
         return PositionSnapshot(
             coin=coin_name,
@@ -1077,6 +1124,9 @@ class Delta:
         )
         logger.info(
             f"滑點/費用限制: slippage≤{self.slippage_cap_bps:.1f}bps, fee≈{self.fee_bps:.1f}bps, min_qty={self.min_qty}, price_tick={self.price_tick}, qty_step={self.qty_step}"
+        )
+        logger.info(
+            f"倉位有效金額閾值: ≥ {self.min_position_value_usd:.2f} USDC"
         )
 
     
@@ -2542,7 +2592,7 @@ class Delta:
         logger.info("正在啟動 Delta 機器人...")
 
         logger.info(f"{Colors.BOLD}帳戶摘要:{Colors.RESET}")
-        logger.info(f"  總價值: ${Colors.GREEN}{self.total_raw_usd:.2f}{Colors.RESET}")
+        # logger.info(f"  總價值: ${Colors.GREEN}{self.total_raw_usd:.2f}{Colors.RESET}")
         logger.info(f"  帳戶價值: ${Colors.GREEN}{self.account_value:.2f}{Colors.RESET}")
         logger.info(f"  已用保證金: ${Colors.YELLOW}{self.total_margin_used:.2f}{Colors.RESET}")
         logger.info(f"  永續合約帳戶價值: ${Colors.BLUE}{self.perp_user_state:.2f}{Colors.RESET}")

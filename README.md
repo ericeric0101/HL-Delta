@@ -59,7 +59,8 @@ The preferred way to configure the bot is through the `config.json` file, which 
     "cooldown_after_replace_minutes": 30,
     "use_post_only_for_entry": true,
     "use_post_only_for_hedge": false,
-    "rebalance_order_type": "passive_then_ioc"
+    "rebalance_order_type": "passive_then_ioc",
+    "min_position_value_usd": 10.0
   },
   "api": {
     "host": "0.0.0.0",
@@ -99,6 +100,7 @@ Configuration sections:
   - `use_post_only_for_entry`: Whether to use post-only orders while entering.
   - `use_post_only_for_hedge`: Whether to use post-only orders while hedging (defaults to `false`).
   - `rebalance_order_type`: `passive_then_ioc` attempts a passive limit first and falls back to IOC if needed.
+  - `min_position_value_usd`: Minimum notional (in USDC) required for a leg to be considered an active position rather than dust.
 - **API settings:**
   - `host`: Host for the API server
   - `port`: Port for the API server

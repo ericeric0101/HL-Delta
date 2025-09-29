@@ -258,7 +258,7 @@ python example.py
 ## 一旦啟動，系統會進入主要監控循環：
 - **心跳頻率**：依 `heartbeat_sec`（預設 3 秒）運行狀態機，更新倉位並執行補腿/再平衡。
 - **資金費率監控**：依 `funding_refresh_sec` 收集最新 predicted funding；`funding_check_minute` 保留逐小時檢查。
-- **自動開倉條件**：當最佳幣種年化資金費率 ≥ `funding_open_threshold_pct` 且未處於冷卻/最小持倉期間時，自動建立 Delta 中性部位。
+- **自動開倉條件**：當最佳幣種年化資金費率 ≥ `funding_open_threshold_pct` 且未處於冷卻/最小持倉期間時，自動建立Delta中性部位。
 
 ## 系統會自動執行以下操作：
 - 創建部位：同時買入現貨和做空永續合約
@@ -317,6 +317,29 @@ python Delta.py
 - `GET /api/config/tracked-coins`: 獲取追蹤的代幣列表
 - `POST /api/config/add-coin/{coin}`: 將代幣添加到追蹤列表
 - `POST /api/config/remove-coin/{coin}`: 從追蹤列表中移除代幣
+
+#### 調整追蹤幣種有兩種做法：
+
+**熱更新（建議用於上線環境，也可在本機跑起來後使用）**
+
+後端與 API 起來後，直接打 REST 端點即可，不需要重啟、也不會觸發平倉程序。
+範例（請替換實際的 API key 與主機/port）：
+# 新增幣種
+curl -X POST http://localhost:8080/api/config/add-coin/{coin name; e.g. XPL} \
+     -H 'Content-Type: application/json' \
+     -H 'X-API-KEY: <API_SECRET_KEY>'
+
+# 移除幣種
+curl -X POST http://localhost:8080/api/config/remove-coin/{coin name; e.g. XPL} \
+     -H 'Content-Type: application/json' \
+     -H 'X-API-KEY: <API_SECRET_KEY>'
+
+# 確認當前追蹤清單
+curl -X GET http://localhost:8080/api/config/tracked-coins \
+     -H 'X-API-KEY: <API_SECRET_KEY>'
+
+發送完請求後，下一個 heartbeat（3 秒預設）就會載入新幣的 meta/資金費率並開始追蹤；不需要重啟，也不會自動平倉。
+**若在伺服器上部署，只要把 localhost:8080 換成後端網址即可。**
 
 ## 使用方式
 

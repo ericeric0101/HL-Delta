@@ -11,6 +11,7 @@
 - 自動識別最佳資金費率以獲得最佳收益
 - **[新]** 永久紀錄所有交易訂單與每小時的資產快照至 Supabase 雲端資料庫
 - **[新]** 前端儀表板升級，新增「交易紀錄」分頁，清晰呈現所有歷史交易
+- **[新]** 多通道日誌（info/error/debug）與 Telegram 錯誤通知，快速回溯故障狀態
 - 採用 Maker 訂單策略 (Post-Only) 執行交易，旨在賺取手續費返利而非支付交易費用
 - 自動化動態風險管理，定期檢查並重新平衡持倉，以嚴格維持 Delta 中性
 - 整合利潤再投資機制，在完成交易週期後自動將利潤滾入本金，實現複利增長
@@ -42,6 +43,15 @@
     1.  **全新的分頁設計**：為了避免在單一頁面無限滾動，我們將儀表板重構為分頁式設計，包含「**總覽**」和「**交易紀錄**」兩個主要分頁。
     2.  **交易紀錄表格**：在「交易紀錄」分頁中，我們建立了一個功能完善的表格，用於顯示所有歷史交易。表格支援**分頁瀏覽**，讓您即使在交易量巨大時也能輕鬆查閱。
     3.  **後端驅動**：此表格的數據來自我們在後端建立的 `/api/status/trade-history` API 端點，確保了數據的安全與一致性。
+
+## 日誌與通知更新（2025.09）
+
+- **多通道日誌分流**：現在會同時輸出 `logs/info.log`（一般狀態）、`logs/error.log`（警告與錯誤）以及可選的 `logs/debug.log`（僅在 `general.debug=true` 時啟用），console 只保留 WARNING 以上訊息，排除例行噪音。
+- **Heartbeat 降噪**：心跳訊息改為 DEBUG 等級，僅每 30 分鐘寫入一筆 INFO 摘要，仍可在 debug 檔內檢視細節。
+- **錯誤快照**：當出現 WARNING/ERROR 時，系統會把倉位快照、資金費率、最後一次下單紀錄與關鍵設定寫入 `error.log`，協助快速回溯事故原因。
+- **Telegram 通知**：若在設定檔或環境變數提供 Telegram bot 資料，WARNING/ERROR 發生時會自動推播錯誤摘要到指定聊群，並具備節流（預設 180 秒）避免通知轟炸。
+
+> 📌 提示：相關設定可透過 `config.json` 的 `logging`、`notifications` 區塊或環境變數覆寫，詳見下方「設定」章節。
 
 ## 核心交易策略更新
 
@@ -121,6 +131,7 @@
     "target_perp_leverage": 1.0,
     "delta_threshold_pct": 5.0,
     "min_rebalance_interval_sec": 5,
+    "rebalance_entry_cooldown_sec": 12,
     "max_retries": 3,
     "slippage_cap_bps": 15,
     "fee_bps": 2,
@@ -140,6 +151,18 @@
     "use_post_only_for_hedge": false,
     "rebalance_order_type": "passive_then_ioc",
     "min_position_value_usd": 10.0
+  },
+  "logging": {
+    "directory": "logs",
+    "console_level": "WARNING",
+    "heartbeat_info_interval_sec": 1800
+  },
+  "notifications": {
+    "telegram": {
+      "bot_token": "${TELEGRAM_BOT_TOKEN}",
+      "chat_id": "${TELEGRAM_CHAT_ID}",
+      "rate_limit_sec": 180
+    }
   },
   "api": {
     "host": "0.0.0.0",
@@ -161,6 +184,7 @@
   - `target_perp_leverage`: 計算永續腿名目金額時的目標槓桿，上限新倉規模。
   - `delta_threshold_pct`: 名目價值偏離超過此百分比即觸發再平衡。
   - `min_rebalance_interval_sec`: 兩次再平衡之間的最短間隔，避免過度觸發。
+  - `rebalance_entry_cooldown_sec`: 開倉後暫緩評估再平衡的冷卻秒數，避免資料尚未同步時誤判。
   - `max_retries`: 單腿補救 / 再平衡的最大重試次數，超過後改為平掉現有腿。
   - `slippage_cap_bps`: 下單時允許的滑點上限（基於最佳買賣價）。
   - `fee_bps`: 預估手續費，供名目計算與紀錄使用。
@@ -177,6 +201,13 @@
   - `use_post_only_for_hedge`: 是否在補腿時使用 post only（預設禁用以避免拒單）。
   - `rebalance_order_type`: `passive_then_ioc` 代表先用限價嘗試，未成交再降級成 IOC。
   - `min_position_value_usd`: 單腿名目價值若低於此金額（USDC），視為零倉位並忽略。
+- **日誌設定 (`logging`):**
+  - `directory`: 指定日誌輸出資料夾，預設為 `logs`。
+  - `console_level`: 控制 console 顯示的最低等級，建議維持 `WARNING` 以降低噪音。
+  - `heartbeat_info_interval_sec`: 每隔多少秒輸出一筆 INFO 心跳摘要，預設 1800 秒（30 分鐘）。
+- **通知設定 (`notifications`):**
+  - `telegram.bot_token` / `telegram.chat_id`: 若填入或透過環境變數提供，即可啟用 Telegram 錯誤通知。
+  - `telegram.rate_limit_sec`: 同類通知的節流秒數，避免短時間內大量推播。
 - **分配設定:**
   - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）。
   - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）。
@@ -195,6 +226,8 @@
 - `API_SECRET_KEY`: **(必需)** 用於保護後端 API 的金鑰，前端連線時需使用相同的金鑰。
 - `SUPABASE_URL`: **(選用, 建議)** 您的 Supabase 專案 URL，用於啟用永久交易紀錄功能。
 - `SUPABASE_KEY`: **(選用, 建議)** 您的 Supabase 專案 `service_role` 金鑰，用於啟用永久交易紀錄功能。
+- `TELEGRAM_BOT_TOKEN`: **(選用)** 若啟用 Telegram 通知，請填入 bot token。
+- `TELEGRAM_CHAT_ID`: **(選用)** 與 bot 對話或群組的 chat id，通知會送達此處。
 
 使用環境變數的範例 (`.env` 檔案內容):
 ```bash
@@ -205,6 +238,10 @@ API_SECRET_KEY=您設定的API金鑰
 # 選用，但強烈建議用於紀錄交易
 SUPABASE_URL=您的Supabase專案URL
 SUPABASE_KEY=您的Supabase專案ServiceRole金鑰
+
+# 選用：啟用 Telegram 錯誤通知
+TELEGRAM_BOT_TOKEN=您的TelegramBotToken
+TELEGRAM_CHAT_ID=您的TelegramChatId
 ```
 
 ## 快速入門

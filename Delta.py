@@ -9,14 +9,18 @@ import asyncio
 import time
 import json
 import math
+import weakref
+import urllib.parse
+import urllib.request
 from decimal import Decimal, ROUND_DOWN, localcontext
+from logging.handlers import RotatingFileHandler
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 import eth_account
 from eth_account.signers.local import LocalAccount
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Union
 from datetime import datetime
 from enum import Enum, auto
 import uuid
@@ -31,15 +35,144 @@ class Colors:
     BLUE = "\033[94m"    # Info messages
     BOLD = "\033[1m"     # Bold text for headers
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("delta.log")
-    ]
-)
+
+class MaxLevelFilter(logging.Filter):
+    def __init__(self, max_level: int) -> None:
+        super().__init__()
+        self.max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= self.max_level
+
+
+class ErrorSnapshotHandler(logging.Handler):
+    def __init__(self, delta_ref: "weakref.ReferenceType[Delta]") -> None:  # type: ignore  # noqa: F821
+        super().__init__(level=logging.WARNING)
+        self._delta_ref = delta_ref
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(record, "_snapshot_processed", False):
+            return
+        record._snapshot_processed = True
+        delta_instance = self._delta_ref()
+        if not delta_instance:
+            return
+        try:
+            delta_instance._handle_warning_or_error(record)  # type: ignore[attr-defined]
+        except Exception:
+            logging.getLogger("HL-Delta").debug("Failed to capture error snapshot", exc_info=True)
+
+
+class TelegramNotifier:
+    def __init__(self, bot_token: str, chat_id: Union[str, int], rate_limit_sec: float = 120.0) -> None:
+        self.bot_token = bot_token
+        self.chat_id = str(chat_id)
+        self.rate_limit_sec = max(rate_limit_sec, 1.0)
+        self._lock = asyncio.Lock()
+        self._last_sent_ts: float = 0.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+    async def send(self, message: str) -> None:
+        if not self.enabled:
+            return
+
+        async with self._lock:
+            now = time.time()
+            if now - self._last_sent_ts < self.rate_limit_sec:
+                return
+            self._last_sent_ts = now
+
+        truncated = message if len(message) <= 3500 else f"{message[:3497]}..."
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = urllib.parse.urlencode({
+            "chat_id": self.chat_id,
+            "text": truncated,
+        }).encode("utf-8")
+
+        def _post() -> None:
+            request = urllib.request.Request(url, data=payload, method="POST")
+            with urllib.request.urlopen(request, timeout=10) as response:  # nosec B310
+                response.read()
+
+        try:
+            await asyncio.to_thread(_post)
+        except Exception:
+            logging.getLogger("HL-Delta").debug("Telegram notification failed", exc_info=True)
+
+
+def _resolve_log_level(level_name: Union[str, int], default: int) -> int:
+    if isinstance(level_name, int):
+        return level_name
+    if isinstance(level_name, str):
+        resolved = getattr(logging, level_name.upper(), None)
+        if isinstance(resolved, int):
+            return resolved
+    return default
+
+
+def _configure_base_logging(
+    log_dir: str,
+    *,
+    debug_enabled: bool = False,
+    console_level: Union[str, int] = logging.WARNING,
+    max_bytes: int = 5_000_000,
+    backup_count: int = 5,
+) -> Dict[str, logging.Handler]:
+    os.makedirs(log_dir, exist_ok=True)
+
+    logger = logging.getLogger("HL-Delta")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(_resolve_log_level(console_level, logging.WARNING))
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    info_path = os.path.join(log_dir, "info.log")
+    info_handler = RotatingFileHandler(info_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+    info_handler.setLevel(logging.INFO)
+    info_handler.addFilter(MaxLevelFilter(logging.INFO))
+    info_handler.setFormatter(formatter)
+    logger.addHandler(info_handler)
+
+    error_path = os.path.join(log_dir, "error.log")
+    error_handler = RotatingFileHandler(error_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+    error_handler.setLevel(logging.WARNING)
+    error_handler.setFormatter(formatter)
+    logger.addHandler(error_handler)
+
+    debug_handler: Optional[logging.Handler] = None
+    if debug_enabled:
+        debug_path = os.path.join(log_dir, "debug.log")
+        debug_handler = RotatingFileHandler(debug_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(formatter)
+        logger.addHandler(debug_handler)
+
+    return {
+        "console": console_handler,
+        "info": info_handler,
+        "error": error_handler,
+        "debug": debug_handler,
+    }
+
+
+DEFAULT_LOG_DIR = os.environ.get("HL_DELTA_LOG_DIR", "logs")
 logger = logging.getLogger("HL-Delta")
+_configure_base_logging(DEFAULT_LOG_DIR)
 
 
 @dataclass
@@ -140,6 +273,24 @@ class Delta:
     def __init__(self, config_path="config.json"):
         self.config_path = config_path
         self.config = self._load_config()
+        logging_cfg = self.config.get("logging", {}) if isinstance(self.config, dict) else {}
+        requested_log_dir = logging_cfg.get("directory") or DEFAULT_LOG_DIR
+        console_level = logging_cfg.get("console_level", logging.WARNING)
+        debug_enabled = bool(self.config.get("general", {}).get("debug", False))
+        max_bytes = int(logging_cfg.get("max_bytes", 5_000_000))
+        backup_count = int(logging_cfg.get("backup_count", 5))
+        _configure_base_logging(
+            requested_log_dir,
+            debug_enabled=debug_enabled,
+            console_level=console_level,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+        )
+        self._log_dir = requested_log_dir
+        self._error_log_path = os.path.join(self._log_dir, "error.log")
+        self._info_log_path = os.path.join(self._log_dir, "info.log")
+        self._install_error_snapshot_handler()
+
         try:
             self.tracked_coins = self.config["general"]["tracked_coins"]
             self.coins: Dict[str, CoinInfo] = {}
@@ -170,6 +321,9 @@ class Delta:
             self.min_rebalance_interval_sec: float = 5.0
             self.max_retries: int = 3
             self.heartbeat_sec: float = 3.0
+            self.rebalance_entry_cooldown_sec: float = 12.0
+            self._heartbeat_info_interval_sec: float = float(logging_cfg.get("heartbeat_info_interval_sec", 1800))
+            self._last_info_heartbeat_ts: float = 0.0
             self.use_post_only_for_entry: bool = True
             self.use_post_only_for_hedge: bool = False
             self.rebalance_order_type: str = "passive_then_ioc"
@@ -180,6 +334,8 @@ class Delta:
             self.cooldown_after_replace_minutes: float = 30.0
             self.min_position_value_usd: float = 10.0
             self._dust_warnings: Dict[str, bool] = {}
+            self._last_order_event: Optional[Dict[str, Any]] = None
+            self._rebalance_block_until: float = 0.0
             
             if self.config["general"].get("debug", False):
                 logger.setLevel(logging.DEBUG)
@@ -202,10 +358,140 @@ class Delta:
             self.margin_account_value = 0
             self.total_raw_usd = 0
             self.total_margin_used = 0
+            notifications_cfg = self.config.get("notifications", {}) if isinstance(self.config, dict) else {}
+            self._telegram_notifier = self._init_telegram_notifier(notifications_cfg.get("telegram", {}))
 
         except Exception as e:
             logger.error(f"初始化客戶端失敗: {e}", exc_info=True)
             raise RuntimeError("客戶端初始化失敗") from e
+
+    def _install_error_snapshot_handler(self) -> None:
+        for handler in list(logger.handlers):
+            if isinstance(handler, ErrorSnapshotHandler):
+                logger.removeHandler(handler)
+        snapshot_handler = ErrorSnapshotHandler(weakref.ref(self))
+        snapshot_handler.setLevel(logging.WARNING)
+        logger.addHandler(snapshot_handler)
+        self._error_snapshot_handler: Optional[logging.Handler] = snapshot_handler
+
+    def _init_telegram_notifier(self, cfg: Dict[str, Any]) -> Optional[TelegramNotifier]:
+        token = (cfg or {}).get("bot_token") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        chat_id = (cfg or {}).get("chat_id") or os.getenv("TELEGRAM_CHAT_ID", "")
+        rate_limit = float((cfg or {}).get("rate_limit_sec", 180.0))
+        if not token or not chat_id:
+            return None
+        try:
+            return TelegramNotifier(token, chat_id, rate_limit)
+        except Exception as exc:
+            logger.warning(f"初始化 Telegram 通知器失敗: {exc}")
+            return None
+
+    def _log_heartbeat(self) -> None:
+        now = time.time()
+        state_name = self.state.name if isinstance(self.state, PositionState) else str(self.state)
+        active_coin = self.active_coin or "-"
+        msg = (
+            f"heartbeat state={state_name} active={active_coin} pending_orders={len(self.pending_orders)} "
+            f"order_groups={len(self.order_groups)} tracked_coins={len(self.tracked_coins)}"
+        )
+        logger.debug(msg)
+        if now - self._last_info_heartbeat_ts >= self._heartbeat_info_interval_sec:
+            logger.info(msg)
+            self._last_info_heartbeat_ts = now
+        self._last_heartbeat = now
+
+    def _notify_error_async(self, message: str) -> None:
+        if not self._telegram_notifier or not self._telegram_notifier.enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._telegram_notifier.send(message))
+
+    def _append_to_error_log(self, snapshot_text: str) -> None:
+        if not snapshot_text or not self._error_log_path:
+            return
+        try:
+            with open(self._error_log_path, "a", encoding="utf-8") as fh:
+                fh.write(snapshot_text)
+        except Exception:
+            logger.debug("寫入錯誤快照失敗", exc_info=True)
+
+    def _build_error_snapshot(self, record: logging.LogRecord) -> Tuple[str, str]:
+        try:
+            timestamp = datetime.utcnow().isoformat()
+            state_name = self.state.name if isinstance(self.state, PositionState) else str(self.state)
+            active_coin = self.active_coin or "-"
+
+            positions: Dict[str, Dict[str, float]] = {}
+            for coin_name in self.tracked_coins:
+                try:
+                    snapshot = self.position_snapshot(coin_name)
+                except Exception as exc:
+                    positions[coin_name] = {"error": str(exc)}
+                    logger.debug(f"Snapshot {coin_name} 失敗: {exc}")
+                    continue
+                if snapshot.spot_size == 0 and snapshot.perp_size == 0:
+                    continue
+                positions[coin_name] = {
+                    "spot_size": snapshot.spot_size,
+                    "perp_size": snapshot.perp_size,
+                    "spot_notional": snapshot.spot_notional,
+                    "perp_notional": snapshot.perp_notional,
+                    "delta_pct": snapshot.delta_pct,
+                }
+
+            payload: Dict[str, Any] = {
+                "timestamp": timestamp,
+                "level": record.levelname,
+                "message": record.getMessage(),
+                "state": state_name,
+                "active_coin": active_coin,
+                "pending_orders": len(self.pending_orders),
+                "open_order_groups": len(self.order_groups),
+                "funding_cache": self.funding_cache,
+                "last_order_event": self._last_order_event,
+                "config": {
+                    "slippage_cap_bps": self.slippage_cap_bps,
+                    "fee_bps": self.fee_bps,
+                    "qty_step": self.qty_step,
+                    "min_qty": self.min_qty,
+                    "min_position_value_usd": self.min_position_value_usd,
+                },
+                "positions": positions,
+            }
+
+            snapshot_text = (
+                "\n--- ERROR SNAPSHOT ---\n"
+                f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+                "--- END SNAPSHOT ---\n"
+            )
+
+            summary_lines = [
+                f"[HL-Delta] {record.levelname}",
+                record.getMessage(),
+                f"state={state_name} active={active_coin}",
+                f"pending={len(self.pending_orders)} groups={len(self.order_groups)}",
+            ]
+            if self._last_order_event:
+                summary_lines.append(
+                    f"last_order={self._last_order_event.get('context')} "
+                    f"{self._last_order_event.get('market')} {self._last_order_event.get('side')} "
+                    f"qty={self._last_order_event.get('size')}"
+                )
+            summary_text = "\n".join(summary_lines)
+            return snapshot_text, summary_text
+        except Exception:
+            logger.debug("組裝錯誤快照失敗", exc_info=True)
+            return "", ""
+
+    def _handle_warning_or_error(self, record: logging.LogRecord) -> None:
+        snapshot_text, summary_text = self._build_error_snapshot(record)
+        if snapshot_text:
+            self._append_to_error_log(snapshot_text)
+        if summary_text:
+            self._notify_error_async(summary_text)
 
     async def initialize(self):
         """Performs asynchronous setup tasks after construction."""
@@ -371,6 +657,9 @@ class Delta:
         self.target_perp_leverage = max(float(trading_cfg.get("target_perp_leverage", 1.0)), 0.1)
         self.delta_threshold_pct = float(trading_cfg.get("delta_threshold_pct", 5.0))
         self.min_rebalance_interval_sec = float(trading_cfg.get("min_rebalance_interval_sec", 5))
+        self.rebalance_entry_cooldown_sec = float(
+            trading_cfg.get("rebalance_entry_cooldown_sec", self.rebalance_entry_cooldown_sec)
+        )
         self.max_retries = max(int(trading_cfg.get("max_retries", 3)), 1)
         self.slippage_cap_bps = float(trading_cfg.get("slippage_cap_bps", 15))
         self.fee_bps = float(trading_cfg.get("fee_bps", 2))
@@ -542,17 +831,36 @@ class Delta:
                         state = "error_response"
                         error_msg = raw_status.get("error")
                     else:
-                        state = "accepted"
-                logger.info(
-                    f"訂單提交成功 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price} 狀態:{state} OID:{oid}"
-                )
-                if error_msg:
-                    logger.error(f"訂單提交回傳錯誤訊息: {error_msg}")
+                        state = raw_status.get("status") or "accepted"
+                        error_msg = raw_status.get("error") or raw_status.get("errorMessage")
+
+                if state == "error_response" or (error_msg and state not in ("filled", "resting")):
+                    logger.error(
+                        f"訂單提交失敗 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price} 錯誤:{error_msg or state}"
+                    )
+                else:
+                    logger.info(
+                        f"訂單提交成功 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price} 狀態:{state} OID:{oid}"
+                    )
+                    if error_msg:
+                        logger.error(f"訂單提交回傳錯誤訊息: {error_msg}")
             else:
                 error_msg = response or result
                 logger.error(
                     f"訂單提交失敗 [{context}] - 幣種:{coin_name} 市場:{market} 方向:{side} 數量:{size} 價格:{price}，回傳: {error_msg}"
                 )
+            self._last_order_event = {
+                "timestamp": time.time(),
+                "coin": coin_name,
+                "market": market,
+                "side": side,
+                "size": size,
+                "price": price,
+                "status": state,
+                "context": context,
+                "oid": oid,
+                "error": error_msg,
+            }
         except Exception as e:
             logger.error(f"記錄訂單提交結果時發生錯誤: {e}", exc_info=True)
 
@@ -734,7 +1042,8 @@ class Delta:
 
         # 為確保 Ioc 訂單能成交，買單略微抬價、賣單略微降價
         adjustment = 1.01 if is_buy else 0.99
-        return price * adjustment
+        adjusted = price * adjustment
+        return self.round_price(coin_name, adjusted, is_spot)
     
     def _apply_safety_step(self, qty: float, step: float, decimals: int, min_qty: float = 0.0) -> float:
         if qty <= 0 or step <= 0:
@@ -1167,6 +1476,103 @@ class Delta:
 
         return action
 
+    def _prepare_rebalance_action(self, snapshot: PositionSnapshot, action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        qty = action.get("qty", 0.0)
+        if qty <= 0:
+            return None
+
+        coin = action.get("coin")
+        market = action.get("market")
+        side = action.get("side")
+        if not coin or not market or not side:
+            return None
+
+        coin_info = self.coins.get(coin)
+        global_min_qty = self.min_qty if self.min_qty > 0 else 0.0
+
+        if market == "spot":
+            market_meta = coin_info.spot if coin_info and coin_info.spot else None
+            decimals = getattr(market_meta, "sz_decimals", 8)
+            step = self._get_effective_qty_step(coin, True, decimals)
+            raw_min_qty = getattr(market_meta, "min_qty", 0.0) if market_meta else 0.0
+            try:
+                market_min_qty = float(raw_min_qty) if raw_min_qty else 0.0
+            except (TypeError, ValueError):
+                market_min_qty = 0.0
+            effective_min_qty = max(market_min_qty, global_min_qty)
+            min_notional = 0.0
+            raw_min_notional = getattr(market_meta, "min_notional", 0.0) if market_meta else 0.0
+            try:
+                min_notional = float(raw_min_notional) if raw_min_notional else 0.0
+            except (TypeError, ValueError):
+                min_notional = 0.0
+
+            if side == "buy":
+                _, available_usdc, _ = self._get_spot_balance("USDC", refresh=True)
+                price = action.get("price") or snapshot.spot_price or snapshot.perp_price
+                if price is None or price <= 0:
+                    logger.warning(f"{coin} 再平衡缺少有效價格，跳過。")
+                    return None
+                affordable_qty = available_usdc / price if price > 0 else 0.0
+                affordable_qty = self.round_size(coin, True, max(affordable_qty, 0.0))
+                if affordable_qty <= 0:
+                    logger.info(f"{coin} 再平衡可用 USDC 不足 ({available_usdc:.4f})，暫停補現貨。")
+                    return None
+                qty = min(qty, affordable_qty)
+                if qty > 0 and step > 0 and qty > step * 1.5:
+                    qty = self._apply_safety_step(qty, step, decimals, min_qty=effective_min_qty)
+            else:
+                available_spot = snapshot.spot_size
+                qty = min(qty, self.round_size(coin, True, available_spot))
+
+            qty = self.round_size(coin, True, qty)
+            if qty <= 0:
+                return None
+            if effective_min_qty > 0 and qty < effective_min_qty:
+                logger.info(f"{coin} 再平衡數量 {qty} 低於最小下單量 {effective_min_qty}，放棄。")
+                return None
+            notional = qty * (action.get("price") or snapshot.spot_price or snapshot.perp_price or 0.0)
+            notional_threshold = min_notional if min_notional > 0 else max(self.min_position_value_usd, 0)
+            if notional_threshold > 0 and notional < notional_threshold:
+                logger.info(f"{coin} 再平衡名義 {notional:.4f} 小於最小值 {notional_threshold}, 跳過。")
+                return None
+
+        else:
+            market_meta = coin_info.perp if coin_info and coin_info.perp else None
+            decimals = getattr(market_meta, "sz_decimals", 8)
+            step = self._get_effective_qty_step(coin, False, decimals)
+            qty = self.round_size(coin, False, qty)
+            raw_min_qty = getattr(market_meta, "min_qty", 0.0) if market_meta else 0.0
+            try:
+                market_min_qty = float(raw_min_qty) if raw_min_qty else 0.0
+            except (TypeError, ValueError):
+                market_min_qty = 0.0
+            effective_min_qty = max(market_min_qty, global_min_qty)
+            min_notional = 0.0
+            raw_min_notional = getattr(market_meta, "min_notional", 0.0) if market_meta else 0.0
+            try:
+                min_notional = float(raw_min_notional) if raw_min_notional else 0.0
+            except (TypeError, ValueError):
+                min_notional = 0.0
+            if qty <= 0:
+                return None
+            if step > 0 and qty > step * 1.5:
+                qty = self._apply_safety_step(qty, step, decimals, min_qty=effective_min_qty)
+            if qty <= 0:
+                return None
+            if effective_min_qty > 0 and qty < effective_min_qty:
+                logger.info(f"{coin} 永續再平衡數量 {qty} 低於最小下單量 {effective_min_qty}，跳過。")
+                return None
+            notional = qty * (action.get("price") or snapshot.perp_price or snapshot.spot_price or 0.0)
+            notional_threshold = min_notional if min_notional > 0 else max(self.min_position_value_usd, 0)
+            if notional_threshold > 0 and notional < notional_threshold:
+                logger.info(f"{coin} 永續再平衡名義 {notional:.4f} 小於最小值 {notional_threshold}, 跳過。")
+                return None
+
+        prepared = dict(action)
+        prepared["qty"] = qty
+        return prepared
+
     def has_delta_neutral_position(self, coin_name, error_margin=0.05):
         if coin_name not in self.coins:
             logger.warning(f"在追蹤的幣種中找不到 {coin_name}")
@@ -1523,6 +1929,11 @@ class Delta:
 
         await self._refresh_positions_if_due(force=True)
         self.last_entry_ts = time.time()
+        if self.rebalance_entry_cooldown_sec > 0:
+            self._rebalance_block_until = max(
+                self._rebalance_block_until,
+                self.last_entry_ts + self.rebalance_entry_cooldown_sec,
+            )
         snapshot = self.position_snapshot(coin_name)
         if self.is_delta_ok(snapshot.delta_pct):
             self._transition_state(PositionState.DELTA_NEUTRAL)
@@ -1638,6 +2049,11 @@ class Delta:
             logger.warning(f"{coin_name} 單腿補救未成交 ({outcome.get('status')}), 將於下一心跳重試。")
 
     async def _handle_rebalance(self, coin_name: str, snapshot: PositionSnapshot) -> None:
+        if self._rebalance_block_until and time.time() < self._rebalance_block_until:
+            remaining = self._rebalance_block_until - time.time()
+            logger.debug(f"再平衡冷卻中 ({remaining:.1f}s)，暫不調整。")
+            return
+
         since_last = time.time() - self.last_rebalance_ts
         if since_last < self.min_rebalance_interval_sec:
             logger.debug(f"距離上次再平衡僅 {since_last:.1f}s，等待。")
@@ -1647,26 +2063,35 @@ class Delta:
         if not action:
             logger.info(f"{coin_name} 再平衡需求消失，回到 Delta 中性。")
             self._transition_state(PositionState.DELTA_NEUTRAL)
+            self._rebalance_block_until = 0.0
+            return
+
+        prepared_action = self._prepare_rebalance_action(snapshot, action)
+        if not prepared_action:
+            self.last_rebalance_ts = time.time()
+            logger.info(f"{coin_name} 再平衡需求存在，但暫無足夠資源執行，下次心跳再嘗試。")
             return
 
         logger.info(
-            f"{coin_name} Delta 偏離 {snapshot.delta_pct:.2f}% (>={self.delta_threshold_pct:.2f}%)，僅對 {action['market']} 下單 {action['side']} {action['qty']}"
+            f"{coin_name} Delta 偏離 {snapshot.delta_pct:.2f}% (>={self.delta_threshold_pct:.2f}%)，僅對 {prepared_action['market']} 下單 {prepared_action['side']} {prepared_action['qty']}"
         )
 
         group = await self.place_order_best_effort(
             coin_name,
-            action["market"],
-            action["side"],
-            action["qty"],
+            prepared_action["market"],
+            prepared_action["side"],
+            prepared_action["qty"],
             "rebalance",
             allow_post_only=False,
         )
         if not group:
+            self.last_rebalance_ts = time.time()
             return
 
         outcome = await self.await_fills_or_timeout(group.group_id, timeout_sec=5)
         if outcome.get("filled"):
             self.last_rebalance_ts = time.time()
+            self._rebalance_block_until = 0.0
             await self._refresh_positions_if_due(force=True)
             updated = self.position_snapshot(coin_name)
             if self.is_delta_ok(updated.delta_pct):
@@ -1675,6 +2100,7 @@ class Delta:
             else:
                 logger.warning(f"{coin_name} 再平衡後 Δ 仍為 {updated.delta_pct:.2f}% ，將再次嘗試。")
         else:
+            self.last_rebalance_ts = time.time()
             logger.warning(f"{coin_name} 再平衡訂單未成交 ({outcome.get('status')})")
 
     async def _evaluate_funding_for_replace(self, coin_name: str) -> None:
@@ -1823,12 +2249,18 @@ class Delta:
         
         try:
             status_info = order_result['response']['data']['statuses'][0]
+            status_code = status_info.get('status')
+            error_text = status_info.get('error') or status_info.get('errorMessage') or status_info.get('message')
+            if status_code and str(status_code).lower() == 'error':
+                return {"status": "error", "state": "error_response", "oid": None, "error_message": error_text or "Exchange rejected order"}
             if 'resting' in status_info:
                 return {"status": "ok", "state": "resting", "oid": int(status_info['resting']['oid']), "error_message": None}
             elif 'filled' in status_info:
                 return {"status": "ok", "state": "filled", "oid": int(status_info['filled']['oid']), "error_message": None}
             elif 'error' in status_info:
                 return {"status": "error", "state": "error_response", "oid": None, "error_message": status_info['error']}
+            elif error_text:
+                return {"status": "error", "state": "error_response", "oid": None, "error_message": error_text}
             else:
                 return {"status": "error", "state": "unknown", "oid": None, "error_message": "Unknown order status response"}
         except (KeyError, IndexError) as e:
@@ -1936,11 +2368,14 @@ class Delta:
         status = self._get_order_status(result)
 
         error_message = status.get("error_message") or ""
-        if status["status"] == "error" and use_post_only and "immediately matched" in error_message:
+        state = status.get("state")
+        status_code = status.get("status")
+
+        if use_post_only and state == "error_response" and "immediately matched" in error_message:
             logger.warning(f"Post only 被拒 ({error_message})，改用非 post only 策略。")
             return await self.place_order_best_effort(coin_name, market, side, qty, intent, allow_post_only=False)
 
-        if status["status"] == "error":
+        if status_code == "error" or state == "error_response":
             logger.error(f"{coin_name} {market} 下單失敗: {error_message}")
             return None
 
@@ -2023,46 +2458,55 @@ class Delta:
             await asyncio.sleep(poll_interval)
 
         if result_summary["status"] != "completed" and group.needs_fallback:
-            logger.info(f"{group.coin} {group.intent} 第一階段未成交，降級為 IOC。")
-            await _cancel_oids(group.oids)
-            best_bid, best_ask = self._get_top_of_book(group.coin)
-            base_price = best_ask if group.side == "buy" else best_bid
-            slippage_factor = self.slippage_cap_bps / 10000 if self.slippage_cap_bps > 0 else 0
-            if group.side == "buy":
-                price = base_price * (1 + slippage_factor)
-            else:
-                price = base_price * (1 - slippage_factor)
-            price = self.round_price(group.coin, price, group.market == "spot")
-            params = {"limit": {"tif": "Ioc"}}
-            market_name = self._get_spot_pair(group.coin) if group.market == "spot" else group.coin
-            side_bool = True if group.side == "buy" else False
-            try:
-                fallback_result = self.exchange.order(
-                    market_name,
-                    side_bool,
-                    group.qty,
-                    price,
-                    params,
-                )
-            except Exception as exc:
-                logger.error(f"執行 IOC 回退失敗: {exc}", exc_info=True)
-                result_summary.update({"status": "fallback_failed", "filled": False})
-            else:
-                self._log_order_submission(group.coin, group.market, group.side, group.qty, price, fallback_result, f"{group.intent}-fallback")
-                status = self._get_order_status(fallback_result)
-                if status["status"] == "ok":
-                    group.oids = [status.get("oid")]
-                    group.needs_fallback = False
-                    start_ts = time.time()
-                    while time.time() - start_ts < timeout_sec:
-                        all_done, any_filled = await _poll_status(group.oids)
-                        if all_done:
-                            result_summary.update({"status": "completed", "filled": any_filled})
-                            break
-                        await asyncio.sleep(poll_interval)
-                else:
-                    result_summary.update({"status": "fallback_failed", "filled": False})
+            logger.info(f"{group.coin} {group.intent} 第一階段未成交，檢查是否需要降級為 IOC。")
 
+            pre_all_done, pre_filled = await _poll_status(group.oids)
+            if pre_filled and pre_all_done:
+                result_summary.update({"status": "completed", "filled": True})
+            else:
+                await _cancel_oids(group.oids)
+                post_all_done, post_filled = await _poll_status(group.oids)
+                if post_filled:
+                    result_summary.update({"status": "completed", "filled": True})
+                else:
+                    logger.info(f"{group.coin} {group.intent} 第一階段確定未成交，降級為 IOC。")
+                    best_bid, best_ask = self._get_top_of_book(group.coin)
+                    base_price = best_ask if group.side == "buy" else best_bid
+                    slippage_factor = self.slippage_cap_bps / 10000 if self.slippage_cap_bps > 0 else 0
+                    if group.side == "buy":
+                        price = base_price * (1 + slippage_factor)
+                    else:
+                        price = base_price * (1 - slippage_factor)
+                    price = self.round_price(group.coin, price, group.market == "spot")
+                    params = {"limit": {"tif": "Ioc"}}
+                    market_name = self._get_spot_pair(group.coin) if group.market == "spot" else group.coin
+                    side_bool = True if group.side == "buy" else False
+                    try:
+                        fallback_result = self.exchange.order(
+                            market_name,
+                            side_bool,
+                            group.qty,
+                            price,
+                            params,
+                        )
+                    except Exception as exc:
+                        logger.error(f"執行 IOC 回退失敗: {exc}", exc_info=True)
+                        result_summary.update({"status": "fallback_failed", "filled": False})
+                    else:
+                        self._log_order_submission(group.coin, group.market, group.side, group.qty, price, fallback_result, f"{group.intent}-fallback")
+                        status = self._get_order_status(fallback_result)
+                        if status["status"] == "ok":
+                            group.oids = [status.get("oid")]
+                            group.needs_fallback = False
+                            start_ts = time.time()
+                            while time.time() - start_ts < timeout_sec:
+                                all_done, any_filled = await _poll_status(group.oids)
+                                if all_done:
+                                    result_summary.update({"status": "completed", "filled": any_filled})
+                                    break
+                                await asyncio.sleep(poll_interval)
+                        else:
+                            result_summary.update({"status": "fallback_failed", "filled": False})
         if result_summary["status"] == "pending":
             result_summary.update({"status": "timeout", "filled": False})
 
@@ -3057,6 +3501,7 @@ class Delta:
         while self._is_running:
             try:
                 await self._run_state_machine()
+                self._log_heartbeat()
                 await asyncio.sleep(self.heartbeat_sec)
             except KeyboardInterrupt:
                 logger.info(f"{Colors.YELLOW}在主迴圈中偵測到鍵盤中斷{Colors.RESET}")

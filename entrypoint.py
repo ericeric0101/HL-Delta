@@ -12,6 +12,7 @@ import asyncio
 import signal
 import sys
 import json
+from contextlib import suppress
 from dotenv import load_dotenv
 
 # Load environment variables first to get version info
@@ -30,11 +31,20 @@ from api.websocket_manager import WebSocketLogHandler, manager
 
 # Global reference to the bot instance
 delta_bot = None
+shutdown_event: asyncio.Event | None = None
+_shutdown_in_progress = False
 
 
-async def graceful_shutdown(loop, bot_instance):
+async def graceful_shutdown(bot_instance: Delta, event: asyncio.Event) -> None:
     """Graceful shutdown of the Delta bot and API server."""
     logger = logging.getLogger("DeltaBot")
+
+    global _shutdown_in_progress
+    if _shutdown_in_progress:
+        logger.debug("Shutdown already in progress; ignoring duplicate signal")
+        return
+    _shutdown_in_progress = True
+
     logger.info("Shutting down gracefully...")
 
     # Stop the API server
@@ -44,19 +54,13 @@ async def graceful_shutdown(loop, bot_instance):
     if bot_instance:
         await bot_instance.exit_program(close_positions=True)
 
-    # Stop the asyncio loop
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    for task in tasks:
-        task.cancel()
-
-    await asyncio.gather(*tasks, return_exceptions=True)
-    loop.stop()
-    sys.exit(0)
+    event.set()
 
 
 async def main():
     """Main entry point for running the Delta bot."""
     global delta_bot
+    global shutdown_event
     
     # Set up logging
     log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -87,10 +91,13 @@ async def main():
     delta_bot = Delta()
     await delta_bot.initialize()
     
+    # Prepare shutdown coordination primitives
+    shutdown_event = asyncio.Event()
+
     # Register signal handlers for graceful shutdown
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(graceful_shutdown(loop, delta_bot))
+            sig, lambda s=sig: asyncio.create_task(graceful_shutdown(delta_bot, shutdown_event))
         )
 
     # Load API configuration from environment
@@ -109,18 +116,21 @@ async def main():
     # Check the autostart setting from the configuration loaded by the bot
     autostart_from_config = delta_bot.config.get("general", {}).get("autostart", True)
 
+    bot_task = None
     if autostart_from_config:
         logger.info(f"Autostarting {BOT_NAME} based on config.json...")
-        await delta_bot.start()
+        bot_task = asyncio.create_task(delta_bot.start(), name="delta-bot-loop")
     else:
         logger.info(f"{BOT_NAME} initialized in standby mode (autostart is false in config.json).")
         logger.info("API server is running. Use the frontend or API to start the bot manually.")
-        # Keep the main task running to keep the API server alive
-        try:
-            while True:
-                await asyncio.sleep(3600)  # Sleep for a long time, or until shutdown is triggered
-        except asyncio.CancelledError:
-            logger.info("Standby mode cancelled.")
+
+    try:
+        await shutdown_event.wait()
+    finally:
+        if bot_task:
+            bot_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await bot_task
 
 
 if __name__ == "__main__":

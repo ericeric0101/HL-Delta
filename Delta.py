@@ -9,6 +9,7 @@ import asyncio
 import time
 import json
 import math
+from decimal import Decimal, ROUND_DOWN, localcontext
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
@@ -54,6 +55,9 @@ class SpotMarket:
     deployer_trading_fee_share: str = "0.0"
     position: Dict[str, Any] = field(default_factory=dict)
     tick_size: float = 0
+    size_step: float = 0.0
+    min_qty: float = 0.0
+    min_notional: float = 0.0
 
 @dataclass
 class PerpMarket:
@@ -65,6 +69,9 @@ class PerpMarket:
     funding_rate: Optional[float] = None
     yearly_funding_rate: Optional[float] = None
     tick_size: float = 0
+    size_step: float = 0.0
+    min_qty: float = 0.0
+    min_notional: float = 0.0
 
 @dataclass
 class CoinInfo:
@@ -239,12 +246,54 @@ class Delta:
                         deployer_trading_fee_share=spot_coin["deployerTradingFeeShare"],
                         tick_size=spot_coin.get("tickSize", 0.001)
                     )
+                    spot_market = self.coins[coin_name].spot
+                    size_step_candidates = [
+                        spot_coin.get("szIncrement"),
+                        spot_coin.get("sizeIncrement"),
+                        spot_coin.get("stepSize"),
+                        spot_coin.get("szStep"),
+                    ]
+                    min_qty_candidates = [
+                        spot_coin.get("minSz"),
+                        spot_coin.get("minSize"),
+                        spot_coin.get("szMin"),
+                    ]
+                    min_notional_candidates = [
+                        spot_coin.get("minNotional"),
+                        spot_coin.get("minSizeUsd"),
+                        spot_coin.get("minUsd"),
+                    ]
+
+                    for candidate in size_step_candidates:
+                        if candidate:
+                            try:
+                                spot_market.size_step = float(candidate)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+
+                    for candidate in min_qty_candidates:
+                        if candidate:
+                            try:
+                                spot_market.min_qty = float(candidate)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+
+                    for candidate in min_notional_candidates:
+                        if candidate:
+                            try:
+                                spot_market.min_notional = float(candidate)
+                                break
+                            except (TypeError, ValueError):
+                                continue
+
                     if coin_name == "BTC":
-                        self.coins[coin_name].spot.tick_size = 1
+                        spot_market.tick_size = 1
                     elif coin_name == "ETH":
-                        self.coins[coin_name].spot.tick_size = 0.1
+                        spot_market.tick_size = 0.1
                     elif coin_name == "SOL":
-                        self.coins[coin_name].spot.tick_size = 0.001
+                        spot_market.tick_size = 0.001
                     spot_market_found = True
                     break
             
@@ -265,6 +314,47 @@ class Delta:
                             index=perp_coins.index(perp_coin),
                             tick_size=perp_tick
                         )
+                        perp_market = self.coins[coin_name].perp
+                        perp_size_step_candidates = [
+                            perp_coin.get("szIncrement"),
+                            perp_coin.get("sizeIncrement"),
+                            perp_coin.get("stepSize"),
+                            perp_coin.get("szStep"),
+                        ]
+                        perp_min_qty_candidates = [
+                            perp_coin.get("minSz"),
+                            perp_coin.get("minSize"),
+                            perp_coin.get("szMin"),
+                        ]
+                        perp_min_notional_candidates = [
+                            perp_coin.get("minNotional"),
+                            perp_coin.get("minSizeUsd"),
+                            perp_coin.get("minUsd"),
+                        ]
+
+                        for candidate in perp_size_step_candidates:
+                            if candidate:
+                                try:
+                                    perp_market.size_step = float(candidate)
+                                    break
+                                except (TypeError, ValueError):
+                                    continue
+
+                        for candidate in perp_min_qty_candidates:
+                            if candidate:
+                                try:
+                                    perp_market.min_qty = float(candidate)
+                                    break
+                                except (TypeError, ValueError):
+                                    continue
+
+                        for candidate in perp_min_notional_candidates:
+                            if candidate:
+                                try:
+                                    perp_market.min_notional = float(candidate)
+                                    break
+                                except (TypeError, ValueError):
+                                    continue
                         break
             
             if not self.coins[coin_name].spot or not self.coins[coin_name].perp:
@@ -513,6 +603,40 @@ class Delta:
             if balance.get("coin") == "USDC":
                 return float(balance.get("total", 0))
         return 0
+
+    def _get_spot_balance(self, coin_name: str, refresh: bool = False) -> Tuple[float, float, float]:
+        if refresh or not self.spot_user_state:
+            self.spot_user_state = self.info.spot_user_state(self.address)
+
+        normalized_target = self._normalize_spot_coin(coin_name)
+        total = available = hold = 0.0
+
+        for balance in self.spot_user_state.get("balances", []):
+            normalized_coin = self._normalize_spot_coin(balance.get("coin", ""))
+            if normalized_coin != normalized_target:
+                continue
+
+            try:
+                total = float(balance.get("total", 0) or 0)
+            except (TypeError, ValueError):
+                total = 0.0
+
+            try:
+                hold = float(balance.get("hold", 0) or 0)
+            except (TypeError, ValueError):
+                hold = 0.0
+
+            available_raw = balance.get("available")
+            if available_raw is not None:
+                try:
+                    available = float(available_raw)
+                except (TypeError, ValueError):
+                    available = max(total - hold, 0.0)
+            else:
+                available = max(total - hold, 0.0)
+            break
+
+        return total, available, hold
     
     def _get_spot_price(self, coin_name: str) -> float:
         """Get the latest spot mid price, handling U-prefix symbols."""
@@ -612,23 +736,117 @@ class Delta:
         adjustment = 1.01 if is_buy else 0.99
         return price * adjustment
     
+    def _apply_safety_step(self, qty: float, step: float, decimals: int, min_qty: float = 0.0) -> float:
+        if qty <= 0 or step <= 0:
+            return max(qty, 0.0)
+
+        adjusted = self._floor_size(qty - step, step, decimals)
+        if adjusted <= 0:
+            return 0.0
+
+        if min_qty > 0 and adjusted < min_qty <= qty:
+            # Keep original quantity if reducing would violate minimum size
+            return qty
+
+        return adjusted
+
+    def _get_effective_qty_step(self, coin_name: str, is_spot: bool, decimals_hint: int = 8) -> float:
+        """Return the configured quantity step for a market, falling back to decimals."""
+        step_candidates: List[float] = []
+        coin_info = self.coins.get(coin_name)
+        market = None
+        if coin_info:
+            market = coin_info.spot if is_spot else coin_info.perp
+        if market:
+            decimals_hint = getattr(market, "sz_decimals", decimals_hint)
+            for attr in ("size_step", "qty_step", "sz_increment", "step_size"):
+                value = getattr(market, attr, 0.0)
+                if value:
+                    try:
+                        step_candidates.append(float(value))
+                    except (TypeError, ValueError):
+                        continue
+
+        if self.qty_step > 0:
+            step_candidates.append(self.qty_step)
+
+        for candidate in step_candidates:
+            if candidate and candidate > 0:
+                return candidate
+
+        try:
+            return 10 ** (-decimals_hint)
+        except Exception:
+            return 0.0
+
+    def _floor_size(self, size: float, step: float, decimals: int) -> float:
+        if size <= 0:
+            return 0.0
+
+        if step is None or step <= 0:
+            try:
+                step = 10 ** (-decimals)
+            except Exception:
+                step = 0.0
+
+        if step <= 0:
+            return max(round(size, decimals), 0.0)
+
+        with localcontext() as ctx:
+            ctx.prec = max(decimals + 8, 28)
+            ctx.rounding = ROUND_DOWN
+            size_dec = Decimal(str(size))
+            step_dec = Decimal(str(step))
+
+            if step_dec <= 0:
+                floored = size_dec
+            else:
+                try:
+                    units = (size_dec / step_dec).to_integral_value(rounding=ROUND_DOWN)
+                except Exception:
+                    units = Decimal(0)
+                floored = units * step_dec
+
+            try:
+                floored = floored.quantize(step_dec, rounding=ROUND_DOWN)
+            except Exception:
+                floored = floored
+
+            if floored < 0:
+                floored = Decimal('0')
+
+            result = float(floored)
+
+        return max(round(result, min(decimals, 12)), 0.0)
+
     def round_size(self, coin_name: str, is_spot: bool, size: float) -> float:
         if size <= 0:
-            return 0
-        decimals = 8
-        if coin_name in self.coins:
-            if is_spot and self.coins[coin_name].spot:
-                decimals = self.coins[coin_name].spot.sz_decimals
-            elif not is_spot and self.coins[coin_name].perp:
-                decimals = self.coins[coin_name].perp.sz_decimals
+            return 0.0
 
-        rounded = round(size, decimals)
-        step = self.qty_step if self.qty_step > 0 else None
-        if step:
-            rounded = math.floor(rounded / step) * step
-        if self.min_qty > 0 and rounded < self.min_qty:
-            return 0
-        return max(rounded, 0)
+        decimals = 8
+        min_qty_market = 0.0
+        coin_info = self.coins.get(coin_name)
+        market = None
+        if coin_info:
+            market = coin_info.spot if is_spot else coin_info.perp
+        if market:
+            decimals = getattr(market, "sz_decimals", decimals)
+            raw_min_qty = getattr(market, "min_qty", 0.0)
+            if raw_min_qty:
+                try:
+                    min_qty_market = float(raw_min_qty)
+                except (TypeError, ValueError):
+                    min_qty_market = 0.0
+
+        step = self._get_effective_qty_step(coin_name, is_spot, decimals)
+        rounded = self._floor_size(size, step, decimals)
+
+        global_min_qty = self.min_qty if self.min_qty > 0 else 0.0
+        effective_min_qty = max(min_qty_market, global_min_qty)
+        if effective_min_qty > 0 and rounded < effective_min_qty:
+            return 0.0
+
+        return max(rounded, 0.0)
     
     def round_price(self, coin_name: str, price: float, is_spot: bool) -> float:
         if price <= 0:
@@ -1856,38 +2074,109 @@ class Delta:
         return result_summary
 
     async def close_existing_leg_asap(self, coin_name: str, leg: str) -> bool:
-        snapshot = self.position_snapshot(coin_name)
-        if leg == "spot":
-            qty = self.round_size(coin_name, True, snapshot.spot_size)
-            side = "sell"
-            is_spot = True
-        elif leg == "perp":
-            if snapshot.perp_size == 0:
+        max_internal_attempts = 3
+
+        for attempt in range(max_internal_attempts):
+            if attempt > 0:
+                await asyncio.sleep(0.05)
+                await self._refresh_positions_if_due(force=True)
+
+            snapshot = self.position_snapshot(coin_name)
+            coin_info = self.coins.get(coin_name)
+
+            if leg == "spot":
+                total, available, hold = self._get_spot_balance(coin_name, refresh=True)
+                raw_qty = min(snapshot.spot_size, available if available > 0 else snapshot.spot_size)
+                side = "sell"
+                is_spot = True
+                market_meta = coin_info.spot if coin_info else None
+                logger.debug(
+                    f"{coin_name} 現貨平倉即時餘額 -> total={total}, available={available}, hold={hold}, snapshot={snapshot.spot_size}"
+                )
+            elif leg == "perp":
+                if snapshot.perp_size == 0:
+                    return True
+                raw_qty = abs(snapshot.perp_size)
+                side = "buy" if snapshot.perp_size < 0 else "sell"
+                is_spot = False
+                market_meta = coin_info.perp if coin_info else None
+            else:
+                logger.error(f"未知的腿型 {leg}")
+                return False
+
+            if raw_qty <= 0:
+                logger.info(f"{coin_name} {leg} 無需緊急平倉 (raw_qty={raw_qty}).")
                 return True
-            qty = self.round_size(coin_name, False, abs(snapshot.perp_size))
-            side = "buy" if snapshot.perp_size < 0 else "sell"
-            is_spot = False
-        else:
-            logger.error(f"未知的腿型 {leg}")
+
+            decimals = getattr(market_meta, "sz_decimals", 8) if market_meta else 8
+            step = self._get_effective_qty_step(coin_name, is_spot, decimals)
+            qty = self.round_size(coin_name, is_spot, raw_qty)
+
+            min_qty_market = getattr(market_meta, "min_qty", 0.0) if market_meta else 0.0
+            try:
+                min_qty_market = float(min_qty_market) if min_qty_market else 0.0
+            except (TypeError, ValueError):
+                min_qty_market = 0.0
+            effective_min_qty = max(min_qty_market, self.min_qty if self.min_qty > 0 else 0.0)
+
+            safety_iterations = max(1, attempt + 1)
+            for _ in range(safety_iterations):
+                qty = self._apply_safety_step(qty, step, decimals, min_qty=effective_min_qty)
+                if qty <= 0:
+                    break
+
+            best_bid, best_ask = self._get_top_of_book(coin_name)
+            reference_price = best_bid if side == "sell" else best_ask
+            if reference_price <= 0:
+                reference_price = self._get_spot_price(coin_name) if is_spot else self._get_perp_price(coin_name)
+
+            min_notional = 0.0
+            if market_meta and getattr(market_meta, "min_notional", 0):
+                try:
+                    min_notional = float(market_meta.min_notional)
+                except (TypeError, ValueError):
+                    min_notional = 0.0
+            dust_threshold = min_notional if min_notional > 0 else max(self.min_position_value_usd, 0)
+
+            notional = qty * reference_price if reference_price and qty else 0.0
+            if qty <= 0 or (effective_min_qty > 0 and qty < effective_min_qty) or (
+                dust_threshold > 0 and reference_price > 0 and notional < dust_threshold
+            ):
+                logger.info(
+                    f"{coin_name} {leg} 剩餘倉位視為 dust，qty={qty}, px={reference_price}, notional={notional:.4f}"
+                )
+                return True
+
+            price = self._get_emergency_price(coin_name, side == "buy", is_spot)
+            params = {"limit": {"tif": "Ioc"}}
+            market_name = self._get_spot_pair(coin_name) if is_spot else coin_name
+            logger.warning(f"緊急平倉 {coin_name} {leg}: {side} {qty} @ {price}")
+            try:
+                result = self.exchange.order(market_name, side == "buy", qty, price, params)
+            except Exception as exc:
+                logger.error(f"緊急平倉 {coin_name} {leg} 失敗: {exc}", exc_info=True)
+                return False
+
+            self._log_order_submission(coin_name, leg, side, qty, price, result, f"close-{leg}")
+            status = self._get_order_status(result)
+
+            if status.get("status") == "ok":
+                await self._refresh_positions_if_due(force=True)
+                return True
+
+            error_message = (status.get("error_message") or "").lower()
+            if status.get("state") == "error_response" and "invalid size" in error_message:
+                logger.warning(
+                    f"{coin_name} {leg} 緊急平倉被交易所拒絕 (invalid size)，重新取得餘額並縮減數量重試 ({attempt + 1}/{max_internal_attempts})."
+                )
+                continue
+
+            await self._refresh_positions_if_due(force=True)
             return False
 
-        if qty <= 0:
-            logger.info(f"{coin_name} {leg} 無需緊急平倉 (qty={qty}).")
-            return True
-
-        price = self._get_emergency_price(coin_name, side == "buy", is_spot)
-        params = {"limit": {"tif": "Ioc"}}
-        market_name = self._get_spot_pair(coin_name) if is_spot else coin_name
-        logger.warning(f"緊急平倉 {coin_name} {leg}: {side} {qty} @ {price}")
-        try:
-            result = self.exchange.order(market_name, side == "buy", qty, price, params)
-        except Exception as exc:
-            logger.error(f"緊急平倉 {coin_name} {leg} 失敗: {exc}", exc_info=True)
-            return False
-
-        self._log_order_submission(coin_name, leg, side, qty, price, result, f"close-{leg}")
-        status = self._get_order_status(result)
-        return status.get("status") == "ok"
+        logger.error(f"{coin_name} {leg} 緊急平倉連續失敗 (invalid size)，放棄。")
+        await self._refresh_positions_if_due(force=True)
+        return False
 
     async def _rollback_position(self, coin_name: str, spot_info: dict, perp_info: dict, spot_size: float, perp_size: float):
         """Rollback logic to cancel resting orders or market-close filled orders."""

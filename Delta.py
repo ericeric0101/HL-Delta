@@ -2127,7 +2127,7 @@ class Delta:
             logger.info(f"距離最小持倉時間尚有 {wait:.0f} 秒，暫不換倉")
             return
 
-        logger.info("收益率低於門檻 → 啟動換倉流程，先平舊倉。")
+        logger.warning("收益率低於門檻 → 啟動換倉流程，先平舊倉。")
         await self._close_position(coin_name, reason="replace")
 
     async def _close_position(self, coin_name: str, reason: str = "manual") -> bool:

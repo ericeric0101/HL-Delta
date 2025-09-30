@@ -2118,13 +2118,13 @@ class Delta:
         # )
 
         if current_rate >= self.funding_replace_threshold_pct:
-            logger.info("收益率高於門檻 → 維持現倉")
+            # logger.info("收益率高於門檻 → 維持現倉")
             return
 
         now = time.time()
         if self.last_entry_ts and (now - self.last_entry_ts) < self.min_hold_minutes * 60:
             wait = self.min_hold_minutes * 60 - (now - self.last_entry_ts)
-            logger.info(f"距離最小持倉時間尚有 {wait:.0f} 秒，暫不換倉")
+            # logger.info(f"距離最小持倉時間尚有 {wait:.0f} 秒，暫不換倉")
             return
 
         logger.warning("收益率低於門檻 → 啟動換倉流程，先平舊倉。")

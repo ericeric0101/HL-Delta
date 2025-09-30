@@ -108,7 +108,13 @@ Configuration sections:
   - `port`: Port for the API server
   - `enabled`: Whether the API server is enabled
 
-### 2. **Environment Variables** - Required for Authentication and API Security
+### 2. **Operational Notes**
+
+- **Log rotation:** Runtime logs are written to `logs/`. Each stream (`info.log`, `error.log`, optional `debug.log`) uses a rotating handler with a 5 MB cap and up to 5 backup files. When a sixth file would be created the oldest backup is removed automatically. You can delete the log files manually at any time; the bot will recreate them on the next write.
+- **Hot-updating tracked coins:** After the backend is running you can add or remove coins without restarting (and therefore without closing the current position) by calling `POST /api/config/add-coin/{coin}` or `POST /api/config/remove-coin/{coin}`. Remember to include the `X-API-KEY` header whose value matches `API_SECRET_KEY`. The next heartbeat (default 3 s) will load metadata and funding for the new coin.
+- **Funding refresh cadence:** Funding data is refreshed every `funding_refresh_sec` seconds (default 60 s). When flat, a new position is opened only if the best annualised funding meets `funding_open_threshold_pct`. When holding a position, the replacement workflow is triggered only if the current coin’s funding drops below `funding_replace_threshold_pct` _and_ `min_hold_minutes` has elapsed.
+
+### 3. **Environment Variables** - Required for Authentication and API Security
 
 These environment variables are used for authentication with HyperLiquid and for securing the bot's API. They must be set in your environment or in a `.env` file.
 

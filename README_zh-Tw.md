@@ -208,6 +208,10 @@
 - **通知設定 (`notifications`):**
   - `telegram.bot_token` / `telegram.chat_id`: 若填入或透過環境變數提供，即可啟用 Telegram 錯誤通知。
   - `telegram.rate_limit_sec`: 同類通知的節流秒數，避免短時間內大量推播。
+- **營運提醒:**
+  - **日誌輪替**：所有日誌輸出到 `logs/`，採用 5 MB × 5 份輪替；一旦需建立第 6 份，最舊的會自動刪除。若要清空，可以直接刪除檔案，bot 會在下一次寫入時自動重建。
+  - **動態調整追蹤幣種**：後端啟動後，可透過 `POST /api/config/add-coin/{coin}` 與 `POST /api/config/remove-coin/{coin}` 即時調整 `tracked_coins`，並提供 `X-API-KEY`（同 `API_SECRET_KEY`）驗證；無需重啟，也不會強制平倉。
+  - **資金費率刷新**：`funding_refresh_sec`（預設 60 秒）決定抓取 predicted funding 的頻率；當完全空倉時，只會對年化資金費率 ≥ `funding_open_threshold_pct` 的幣種開倉；當已有持倉且年化低於 `funding_replace_threshold_pct`，且已達 `min_hold_minutes`，才會啟動換倉，避免因短期波動頻繁重建部位。
 - **分配設定:**
   - `spot_pct`: 分配給現貨倉位的資金百分比（例如 70%）。
   - `perp_pct`: 分配給永續合約倉位的資金百分比（例如 30%）。

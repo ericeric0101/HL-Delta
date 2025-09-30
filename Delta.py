@@ -2477,36 +2477,57 @@ class Delta:
                         price = base_price * (1 + slippage_factor)
                     else:
                         price = base_price * (1 - slippage_factor)
+
+                    coin_info = self.coins.get(group.coin)
+                    tick_size = 0.0
+                    if coin_info:
+                        market_meta = coin_info.spot if group.market == "spot" else coin_info.perp
+                        if market_meta and getattr(market_meta, "tick_size", 0):
+                            try:
+                                tick_size = float(market_meta.tick_size)
+                            except (TypeError, ValueError):
+                                tick_size = 0.0
+
                     price = self.round_price(group.coin, price, group.market == "spot")
-                    params = {"limit": {"tif": "Ioc"}}
-                    market_name = self._get_spot_pair(group.coin) if group.market == "spot" else group.coin
-                    side_bool = True if group.side == "buy" else False
-                    try:
-                        fallback_result = self.exchange.order(
-                            market_name,
-                            side_bool,
-                            group.qty,
-                            price,
-                            params,
-                        )
-                    except Exception as exc:
-                        logger.error(f"執行 IOC 回退失敗: {exc}", exc_info=True)
+                    band = tick_size * 2 if tick_size > 0 else price * 0.001
+                    if group.side == "buy" and best_ask > 0:
+                        price = min(price, self.round_price(group.coin, best_ask + band, group.market == "spot"))
+                    elif group.side == "sell" and best_bid > 0:
+                        price = max(price, self.round_price(group.coin, best_bid - band, group.market == "spot"))
+                    if price <= 0:
                         result_summary.update({"status": "fallback_failed", "filled": False})
                     else:
-                        self._log_order_submission(group.coin, group.market, group.side, group.qty, price, fallback_result, f"{group.intent}-fallback")
-                        status = self._get_order_status(fallback_result)
-                        if status["status"] == "ok":
-                            group.oids = [status.get("oid")]
-                            group.needs_fallback = False
-                            start_ts = time.time()
-                            while time.time() - start_ts < timeout_sec:
-                                all_done, any_filled = await _poll_status(group.oids)
-                                if all_done:
-                                    result_summary.update({"status": "completed", "filled": any_filled})
-                                    break
-                                await asyncio.sleep(poll_interval)
-                        else:
+                        params = {"limit": {"tif": "Ioc"}}
+                        if group.market == "perp" and group.intent.startswith("close"):
+                            params["reduceOnly"] = True
+                        market_name = self._get_spot_pair(group.coin) if group.market == "spot" else group.coin
+                        side_bool = True if group.side == "buy" else False
+                        try:
+                            fallback_result = self.exchange.order(
+                                market_name,
+                                side_bool,
+                                group.qty,
+                                price,
+                                params,
+                            )
+                        except Exception as exc:
+                            logger.error(f"執行 IOC 回退失敗: {exc}", exc_info=True)
                             result_summary.update({"status": "fallback_failed", "filled": False})
+                        else:
+                            self._log_order_submission(group.coin, group.market, group.side, group.qty, price, fallback_result, f"{group.intent}-fallback")
+                            status = self._get_order_status(fallback_result)
+                            if status["status"] == "ok":
+                                group.oids = [status.get("oid")]
+                                group.needs_fallback = False
+                                start_ts = time.time()
+                                while time.time() - start_ts < timeout_sec:
+                                    all_done, any_filled = await _poll_status(group.oids)
+                                    if all_done:
+                                        result_summary.update({"status": "completed", "filled": any_filled})
+                                        break
+                                    await asyncio.sleep(poll_interval)
+                            else:
+                                result_summary.update({"status": "fallback_failed", "filled": False})
         if result_summary["status"] == "pending":
             result_summary.update({"status": "timeout", "filled": False})
 
@@ -2594,6 +2615,8 @@ class Delta:
             price = self._get_emergency_price(coin_name, side == "buy", is_spot)
             params = {"limit": {"tif": "Ioc"}}
             market_name = self._get_spot_pair(coin_name) if is_spot else coin_name
+            if not is_spot:
+                params["reduceOnly"] = True
             logger.warning(f"緊急平倉 {coin_name} {leg}: {side} {qty} @ {price}")
             try:
                 result = self.exchange.order(market_name, side == "buy", qty, price, params)
@@ -2672,7 +2695,7 @@ class Delta:
                         side_to_rollback,
                         effective_perp_size,
                         emergency_price,
-                        {"limit": {"tif": "Ioc"}},
+                        {"limit": {"tif": "Ioc"}, "reduceOnly": True},
                     )
 
     async def _attempt_order_placement(self, coin_name: str, side: str, order_type: str) -> tuple:

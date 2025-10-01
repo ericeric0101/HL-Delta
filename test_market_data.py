@@ -11,7 +11,7 @@ from hyperliquid.info import Info
 
 async def check_funding_rates():
     """Check current funding rates on Hyperliquid."""
-    info = Info()
+    info = Info(skip_ws=True)
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
